@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
@@ -204,6 +205,24 @@ class LocalGitLFSIntegration(unittest.TestCase):
             uploader.upload_run(self.model, self.run, "owner/repo")
         self.assertEqual(git(["rev-parse", "user1"], self.remote), before)
         self.assertTrue((self.run / "metrics.json").is_file())
+
+    def test_zip_upload_and_retry_match_local_archive(self):
+        archive=Path(str(self.run)+'.zip')
+        with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED) as bundle:
+            for path in sorted(self.run.rglob('*')):
+                if path.is_file():bundle.write(path,path.relative_to(self.run).as_posix())
+        receipt=uploader.upload_run(self.model,self.run,'owner/repo',archive_path=archive)
+        clone=self.root/'zip_check'
+        git(['clone','--branch','user1',str(self.remote),str(clone)])
+        remote_archive=clone/'results/user1/run_001/results.zip'
+        self.assertEqual(remote_archive.read_bytes(),archive.read_bytes())
+        (self.run/'upload_status.json').write_text('{"status":"uploaded"}',encoding='utf-8')
+        retried=uploader.upload_run(self.model,self.run,'owner/repo',archive_path=archive)
+        self.assertTrue(retried['already_present'])
+        self.assertEqual(retried['commit_sha'],receipt['commit_sha'])
+        (self.run/'metrics.json').write_text('{"changed":true}',encoding='utf-8')
+        with self.assertRaisesRegex(uploader.UploadError,'ZIP contents differ'):
+            uploader.upload_run(self.model,self.run,'owner/repo',archive_path=archive)
 
     def test_concurrent_fast_forward_is_rebased_without_force(self):
         uploader.upload_run(self.model, self.run, "owner/repo")

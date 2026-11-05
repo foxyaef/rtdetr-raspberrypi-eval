@@ -9,6 +9,11 @@ __pycache__/
 .env.*
 data/
 results/
+queue/*
+!queue/inbox/
+queue/inbox/*
+!queue/inbox/.gitkeep
+.rtdetr_evaluation.lock
 models/*
 !models/.gitkeep
 *.zip

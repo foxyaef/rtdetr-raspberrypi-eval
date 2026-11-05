@@ -37,7 +37,7 @@ BUNDLE_DATA = (
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024
 EXPECTED_FILES = frozenset({
     "code/benchmark.py", "code/coco_data.py", "code/coco_metrics.py",
-    "code/github_upload.py", "protocol.json", "requirements.txt",
+    "code/github_upload.py", "code/model_queue.py", "protocol.json", "requirements.txt",
 })
 ENVIRONMENT_MARKER = ".rtdetr_bootstrap_environment.json"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
@@ -282,12 +282,18 @@ python3 test.py --model user2_v1.onnx    select another model in models/
 python3 test.py --limit 3 --no-upload    first smoke check without GitHub upload
 python3 test.py --repeats 3             repeat inference timing
 python3 test.py --upload-only results/<run>  retry an existing upload
+python3 test.py --queue                 evaluate queue/inbox/ sequentially
+python3 test.py --queue --no-upload     queue with local ZIP output only
+python3 test.py --queue --models user2_v1.onnx user1_v1.onnx  explicit order
+python3 test.py --queue --retry-failed  retry failed/interrupted jobs
+python3 test.py --queue-status         inspect saved queue without setup
+python3 test.py --watch                keep watching queue/inbox/ for new models
 
 Optional: --data-dir PATH, --no-download, --threads N, --repo owner/repository.
 --use-current-python skips private-venv creation only if all pinned packages match.
 
 The workspace is the script's folder, or the parent folder when the script is
-inside code/. Each SSH account/workspace has independent data/results/environment.
+inside code/. All queued models in one workspace share data and environment.
 Git/Git LFS are device-level tools; GitHub write authentication remains per account.
 Without a power meter electrical power is recorded as null.
 """
@@ -305,8 +311,13 @@ def launch(argv=None):
     if sys.maxsize <= 2**32 or not (3, 11) <= sys.version_info[:2] <= (3, 13):
         raise RuntimeError("Use 64-bit Python 3.11, 3.12 or 3.13")
     root = workspace_root()
-    for name in ("code", "models", "data", "results"):
+    for name in ("code", "models", "data", "results", "queue"):
         _private_directory(root / name)
+    _private_directory(root / "queue/inbox")
+    if "--queue-status" in forwarded:
+        state = root / "queue/state.json"
+        print(state.read_text(encoding="utf-8") if state.exists() else "Queue has not been started.")
+        return 0
     with setup_lock(root):
         runtime = materialize_bundle(root)
         python = ensure_environment(root, runtime, options.use_current_python)

@@ -24,6 +24,7 @@ import threading
 import time
 import traceback
 import uuid
+import zipfile
 
 # -------- 사용자가 변경할 설정 --------
 MODEL_NAME = os.environ.get("RTDETR_MODEL_NAME", "user1_v1.onnx")
@@ -332,15 +333,27 @@ def run_stage(stage, config_path, output):
 
 
 def package_results(output):
-    archive=shutil.make_archive(str(output),"zip",root_dir=output)
+    # Stable archive excludes its later upload receipt; retries remain idempotent.
+    archive=Path(str(output)+".zip")
+    temporary=archive.with_suffix(".zip.tmp")
+    try:
+        with zipfile.ZipFile(temporary,"w",compression=zipfile.ZIP_DEFLATED) as bundle:
+            for path in sorted(output.rglob("*")):
+                if path.is_symlink() or bool(getattr(path,"is_junction",lambda:False)()):
+                    raise ValueError("Result archive cannot include symlinks/junctions")
+                if path.is_file() and path!=output/"upload_status.json":
+                    bundle.write(path,path.relative_to(output).as_posix())
+        os.replace(temporary,archive)
+    finally:
+        temporary.unlink(missing_ok=True)
     print("Local results:",output,"\nZIP:",archive,flush=True)
-    return archive
+    return str(archive)
 
 
-def upload(model,output,repo):
+def upload(model,output,repo,archive=None):
     from github_upload import upload_run
     try:
-        result=upload_run(model,output,repo=repo)
+        result=upload_run(model,output,repo=repo,archive_path=archive)
         write_json(output/"upload_status.json",result); print("GitHub upload:",json.dumps(result,ensure_ascii=False),flush=True)
         return True
     except Exception as error:
@@ -352,7 +365,13 @@ def upload(model,output,repo):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model",default=MODEL_NAME,help="Filename within ../models; prefix user1..user4 required")
+    parser.add_argument("--model",help="Single filename within models/; bypasses queue auto-detection")
+    parser.add_argument("--queue",action="store_true",help="Evaluate queue/inbox/ in filename order")
+    parser.add_argument("--models",nargs="+",help="Queue filenames in the desired order")
+    parser.add_argument("--watch",action="store_true",help="Keep checking queue/inbox/ for new models")
+    parser.add_argument("--poll-seconds",type=float,default=15)
+    parser.add_argument("--retry-failed",action="store_true")
+    parser.add_argument("--queue-status",action="store_true")
     parser.add_argument("--data-dir",type=Path,default=ROOT/"data/coco")
     parser.add_argument("--results-dir",type=Path,default=ROOT/"results")
     parser.add_argument("--limit",type=int,default=1000,help="3 for smoke; 1000 for full evaluation")
@@ -372,6 +391,11 @@ def main(argv=None):
         elif args.worker=="infer":infer_worker(config)
         else:score_worker(config)
         return 0
+    from model_queue import evaluation_lock, interrupt_signals, run_queue
+    if args.queue_status:
+        state=ROOT/"queue/state.json"
+        print(state.read_text(encoding="utf-8") if state.exists() else "Queue has not been started.")
+        return 0
     for folder in [ROOT/"code", ROOT/"models", args.results_dir]:
         folder.mkdir(parents=True, exist_ok=True)
     if not args.no_download: args.data_dir.mkdir(parents=True, exist_ok=True)
@@ -381,26 +405,58 @@ def main(argv=None):
         prepare_data(args.data_dir.resolve(),download=not args.no_download); return 0
     if not 1<=args.limit<=1000 or not 1<=args.repeats<=5 or not 1<=args.threads<=64:
         parser.error("limit=1..1000, repeats=1..5, threads=1..64")
+    if not 2<=args.poll_seconds<=60: parser.error("poll-seconds=2..60")
     if sys.maxsize<=2**32:parser.error("Use a 64-bit OS and 64-bit Python for ONNX Runtime")
+    queue_requested=args.queue or args.watch or bool(args.models) or args.retry_failed
+    if args.model and queue_requested: parser.error("Choose --model or a queue, not both")
+    inbox=ROOT/"queue/inbox"
+    automatic=not args.model and not args.upload_only and inbox.is_dir() and any(
+        p.suffix.lower() in (".onnx",".onix") for p in inbox.iterdir())
+    if args.upload_only and queue_requested: parser.error("--upload-only cannot be combined with a queue")
+    if queue_requested or automatic:
+        settings={"limit":args.limit,"repeats":args.repeats,"threads":args.threads,
+                  "data_dir":str(args.data_dir.resolve()),"results_dir":str(args.results_dir.resolve()),
+                  "protocol_sha256":sha256(PROTOCOL_PATH),
+                  "runtime_bundle_sha256":os.environ.get("RTDETR_BUNDLE_SHA256",sha256(__file__))}
+        def evaluate(name,digest,prepared):
+            return evaluate_model(args,name=name,model_directory=inbox,expected_sha=digest,prepared=prepared)
+        with evaluation_lock(ROOT), interrupt_signals():
+            return run_queue(ROOT,settings,
+                lambda:prepare_data(args.data_dir.resolve(),download=not args.no_download),evaluate,
+                names=args.models,retry_failed=args.retry_failed,watch=args.watch,poll_seconds=args.poll_seconds)
     if args.upload_only:
         output=args.upload_only.resolve(); provenance=read_json(output/"provenance.json")
-        model=ROOT/"models"/provenance["model_name"]
+        model=ROOT/provenance.get("model_relative_path","models/"+provenance["model_name"])
         infer_user(model)
-        if model.parent.resolve()!=(ROOT/"models").resolve() or sha256(model)!=provenance["model_sha256"]:
+        if (model.is_symlink() or model.parent.resolve() not in [(ROOT/"models").resolve(),inbox.resolve()]
+                or model.name!=provenance["model_name"] or sha256(model)!=provenance["model_sha256"]):
             raise ValueError("Saved model path/hash does not match this result")
-        okay=upload(model,output,args.repo); package_results(output); return 0 if okay else 2
-    model=ROOT/"models"/args.model
+        with evaluation_lock(ROOT), interrupt_signals():
+            archive=package_results(output)
+            okay=upload(model,output,args.repo,archive); return 0 if okay else 2
+    with evaluation_lock(ROOT), interrupt_signals():
+        return evaluate_model(args,name=args.model or MODEL_NAME)["returncode"]
+
+
+def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=None):
+    from github_upload import infer_user, _is_link
+    from coco_data import prepare_data
+    model_directory=Path(model_directory or ROOT/"models")
+    model=model_directory/name
     user=infer_user(model)
-    if Path(args.model).name!=args.model or model.is_symlink():
-        parser.error("Put the selected single-file model inside models/ and pass its filename")
+    if Path(name).name!=name or _is_link(model):
+        raise ValueError("Put the selected single-file model in its input folder and pass its filename")
     if not model.exists():
         print("Model not found; preparing the account-local environment/data first.",flush=True)
         prepare_data(args.data_dir.resolve(),download=not args.no_download)
         print("Preparation complete. Put your model at:",model,flush=True)
         print("Then run the same test.py command again. No benchmark or upload was performed.",flush=True)
-        return 0
-    if not model.is_file(): parser.error("The selected model must be a regular file")
+        if expected_sha: raise ValueError("Queued model was removed before evaluation")
+        return {"returncode":0,"status":"not_started"}
+    if not model.is_file(): raise ValueError("The selected model must be a regular file")
     model=model.resolve(); source_hash=sha256(model)
+    if expected_sha is not None and source_hash!=expected_sha:
+        raise ValueError("Queued model changed after registration; submit it under a new version name")
     if args.limit!=1000:print(f"SMOKE/PARTIAL: {args.limit} images. Accuracy is not the final 1000-image result.",flush=True)
     stamp=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     output=args.results_dir.resolve()/(model.stem+"_"+stamp+"_"+uuid.uuid4().hex[:8]); output.mkdir(parents=True)
@@ -409,12 +465,13 @@ def main(argv=None):
     config_path=output/"run_config.json"; write_json(config_path,config)
     write_json(output/"system_info.json",system_info())
     write_json(output/"provenance.json",{"model_name":model.name,"model_sha256":source_hash,"user_branch":user,
+               "model_relative_path":model.relative_to(ROOT).as_posix(),
                "test_script_sha256":sha256(__file__),"launcher_sha256":os.environ.get("RTDETR_LAUNCHER_SHA256"),
                "runtime_bundle_sha256":os.environ.get("RTDETR_BUNDLE_SHA256"),
                "created_at_utc":stamp,"full_evaluation":args.limit==1000})
     stage="data_preparation"
     try:
-        prepared=prepare_data(args.data_dir.resolve(),download=not args.no_download)
+        if prepared is None: prepared=prepare_data(args.data_dir.resolve(),download=not args.no_download)
         ann_path=Path(prepared["annotation_path"])
         provenance=read_json(output/"provenance.json")
         provenance.update(evaluation_annotations_sha256=sha256(ann_path),data_manifest_sha256=sha256(prepared["manifest_path"]),
@@ -438,16 +495,20 @@ def main(argv=None):
                           "E2E_p50_ms":resource["latency"]["end_to_end_ms"]["p50"],
                           "CPU_peak_percent_machine":resource["cpu_process_peak_percent_machine_normalized"],
                           "RSS_peak_MiB":resource["rss_peak_bytes"]/1048576,"power":POWER},ensure_ascii=False,indent=2),flush=True)
-    except Exception as error:
+    except (Exception,KeyboardInterrupt) as error:
         write_json(output/"errors.json",[{"stage":stage,"type":type(error).__name__,"error":str(error)}])
-        write_json(output/"evaluation_state.json",{"status":"failed","stage":stage})
+        write_json(output/"evaluation_state.json",{"status":"interrupted" if isinstance(error,KeyboardInterrupt) else "failed","stage":stage})
         (output/"failure.log").write_text(traceback.format_exc(),encoding="utf-8")
-        package_results(output); print(str(error),file=sys.stderr); return 1
+        archive=package_results(output); print(str(error),file=sys.stderr)
+        if isinstance(error,KeyboardInterrupt):
+            error.result_dir=str(output); error.archive_path=archive; raise
+        return {"returncode":1,"result_dir":str(output),"archive_path":archive,"error":str(error),"upload_status":"not_attempted"}
     should_upload=UPLOAD_TO_GITHUB and not args.no_upload
-    okay=upload(model,output,args.repo) if should_upload else True
+    archive=package_results(output)
+    okay=upload(model,output,args.repo,archive) if should_upload else True
     if not should_upload:write_json(output/"upload_status.json",{"status":"disabled"})
-    package_results(output)
-    return 0 if okay else 2
+    return {"returncode":0 if okay else 2,"result_dir":str(output),"archive_path":archive,
+            "upload_status":read_json(output/"upload_status.json")["status"]}
 
 
 if __name__=="__main__":

@@ -8,7 +8,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parent.parent
 FILES = ["code/benchmark.py", "code/coco_data.py", "code/coco_metrics.py",
-         "code/github_upload.py", "protocol.json", "requirements.txt"]
+         "code/github_upload.py", "code/model_queue.py", "protocol.json", "requirements.txt"]
 
 
 def build():

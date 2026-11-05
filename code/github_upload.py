@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from urllib.parse import quote
 
 DEFAULT_REPOSITORY = "foxyaef/rtdetr-raspberrypi-eval"
@@ -222,7 +223,8 @@ def _model_pointer(checkout: Path, model_relative: str) -> str | None:
 
 
 def upload_run(model_path: Path | str, result_dir: Path | str,
-               repo: str = DEFAULT_REPOSITORY, branch: str | None = None) -> dict:
+               repo: str = DEFAULT_REPOSITORY, branch: str | None = None,
+               archive_path: Path | str | None = None) -> dict:
     """Upload one completed run and model to its inferred user branch via Git LFS.
 
     Authentication is supplied by the caller's existing Git credential helper.
@@ -230,6 +232,28 @@ def upload_run(model_path: Path | str, result_dir: Path | str,
     Concurrent branch changes receive at most three normal push attempts.
     """
     model, results, user, files = _validate_inputs(model_path, result_dir, repo, branch)
+    sources = {str(relative).replace("\\", "/"): results / relative for relative in files}
+    if archive_path is not None:
+        archive = Path(archive_path).absolute()
+        if (_is_link(archive) or not archive.is_file() or archive.suffix != ".zip"
+                or not zipfile.is_zipfile(archive)):
+            raise UploadError("Result archive must be an existing regular ZIP file.")
+        if "results.zip" in sources: raise UploadError("Reserved remote filename results.zip already exists")
+        # Only accept the sibling produced by the evaluator, never an arbitrary file.
+        if archive.resolve() != Path(str(results.resolve()) + ".zip"):
+            raise UploadError("Result archive must be the benchmark directory's sibling ZIP")
+        with zipfile.ZipFile(archive) as bundle:
+            expected = {name: _sha256(path) for name, path in sources.items()}
+            infos = bundle.infolist()
+            if len(infos) != len(expected) or {item.filename for item in infos} != set(expected):
+                raise UploadError("Result ZIP contents do not match the result directory")
+            for item in infos:
+                digest = hashlib.sha256()
+                with bundle.open(item) as stream:
+                    for part in iter(lambda: stream.read(1024 * 1024), b""): digest.update(part)
+                if digest.hexdigest() != expected[item.filename]:
+                    raise UploadError("Result ZIP contents differ from the result directory")
+        sources["results.zip"] = archive
     model_sha = _sha256(model)
     try:
         provenance = json.loads((results / "provenance.json").read_text(encoding="utf-8-sig"))
@@ -239,7 +263,7 @@ def upload_run(model_path: Path | str, result_dir: Path | str,
         raise UploadError("provenance.json model_name/model_sha256 does not match the selected model.")
     _run(["--version"])
     _run(["lfs", "version"])
-    result_hashes = {str(p).replace("\\", "/"): _sha256(results / p) for p in files}
+    result_hashes = {name: _sha256(path) for name, path in sources.items()}
     remote = _remote_url(repo)
     try:
         with tempfile.TemporaryDirectory(prefix="rtdetr_upload_") as temporary:
@@ -279,14 +303,13 @@ def upload_run(model_path: Path | str, result_dir: Path | str,
             shutil.copyfile(model, destination_model)
             if _sha256(destination_model) != model_sha or _sha256(model) != model_sha:
                 raise UploadError("Model changed during upload preparation; upload refused.")
-            for relative in files:
-                source = results / relative
+            for relative, source in sources.items():
                 if _is_link(source) or not source.is_file():
                     raise UploadError("Results changed during upload preparation.")
                 target = destination_run / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
-                if _sha256(target) != result_hashes[str(relative).replace("\\", "/")]:
+                if _sha256(target) != result_hashes[relative]:
                     raise UploadError("Results changed during upload preparation; upload refused.")
             _run(["add", "--", ".gitattributes"], checkout)
             # Main ignores local weights/results. Only these explicit paths are
