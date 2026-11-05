@@ -1,6 +1,6 @@
 # RT-DETR Raspberry Pi 공통 평가기
 
-**`test.py` 하나만 복사하면 폴더·전용 가상환경·공통 COCO 이미지를 자동 준비합니다.** 한 SSH 계정의 `queue/inbox/`에 여러 사용자의 모델을 넣고 실행하면, 한 번에 하나씩 평가하고 모델별 결과 ZIP을 저장합니다. 기본 설정에서는 모델명에 맞는 GitHub 사용자 브랜치에도 모델·로그·ZIP을 올립니다.
+**`test.py` 하나만 복사하면 폴더·전용 가상환경·공통 COCO 이미지를 자동 준비합니다.** 기본 실행은 종료하지 않고 `queue/inbox/`를 계속 확인합니다. 여러 사용자의 모델을 한 번에 하나씩 평가하고 ZIP을 저장한 뒤, 다음 모델을 기다립니다. `queue/status.txt`에서 실행 중 모델·대기 건수·바로 사용 가능 여부를 확인할 수 있습니다. 기본 업로드 설정에서는 사용자 GitHub 브랜치에도 모델·로그·ZIP을 올립니다.
 
 ## 처음 한 번 준비
 
@@ -14,7 +14,7 @@ python3 test.py --setup-only
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-dev build-essential git git-lfs gh
+sudo apt install -y python3-venv python3-dev build-essential git git-lfs gh tmux
 ```
 
 GitHub 업로드를 사용할 계정에서 처음 한 번 로그인합니다. 로컬 저장만 하면 이 과정과 Git/Git LFS가 필요하지 않습니다.
@@ -37,6 +37,7 @@ HTTPS 인증을 선택합니다. 실행 계정에는 `foxyaef/rtdetr-raspberrypi
 │   │   ├── user2_v1.onix
 │   │   └── user3_encoder_v2.onnx
 │   ├── state.json                작업 상태·완료 이력 (자동 생성)
+│   ├── status.txt                사람이 읽는 현재 서버 상태 (자동 갱신)
 │   └── summary.csv               모델별 상태·결과 경로 (자동 생성)
 ├── models/                       기존 단일 모델 실행용
 ├── data/coco/                    모두가 공유하는 이미지 한 벌
@@ -52,12 +53,14 @@ HTTPS 인증을 선택합니다. 실행 계정에는 `foxyaef/rtdetr-raspberrypi
 모델을 `queue/inbox/`에 넣은 뒤 다음 중 하나로 실행합니다. 파일 상단의 `MODEL_NAME`은 대기열 모드에서 사용하지 않습니다.
 
 ```bash
-# inbox 모델 자동 인식 → 이름순으로 평가 → ZIP 저장 + GitHub 업로드
+# inbox 모델 자동 인식 → 순차 평가·ZIP 저장·업로드 → 다음 모델 대기
 python3 test.py
 
 # 동일한 평가를 실행하고 로컬 결과·ZIP만 저장
 python3 test.py --no-upload
 ```
+
+기본 업로드를 끄려면 `test.py` 상단을 `UPLOAD_TO_GITHUB = False`로 설정합니다. 이후에는 `--no-upload` 없이 실행해도 로컬에만 저장합니다. 기존 파일을 최신 버전으로 교체했다면 이 개인 설정을 다시 확인하세요.
 
 `test.py`가 `code/` 안에 있다면 모든 명령에서 `python3 code/test.py`를 사용합니다. 폴더는 `code/`와 같은 층위에 생성됩니다. 터미널의 현재 위치와 관계없이 스크립트 위치를 기준으로 경로를 정합니다.
 
@@ -66,7 +69,7 @@ python3 test.py --no-upload
 처음에는 3장으로 동작을 확인하고, 정상 동작하면 1,000장을 평가하세요.
 
 ```bash
-python3 test.py --queue --limit 3 --no-upload
+python3 test.py --once --limit 3 --no-upload
 python3 test.py --queue
 ```
 
@@ -74,15 +77,64 @@ python3 test.py --queue
 
 파일명은 `user1_`~`user4_`로 시작해야 합니다. `.onix`도 받지만 표준 확장자는 **`.onnx`**입니다. 모델 내용은 RT-DETR deploy 입력 `images`, `orig_target_sizes`와 출력 `labels`, `boxes`, `scores`를 가진 **self-contained ONNX**여야 합니다. 외부 가중치 파일을 요구하는 모델은 지원하지 않습니다.
 
-## 새 모델을 계속 받는 감시 모드
+## 계속 켜놓고 사용하기 — 기본 동작
 
 ```bash
-python3 test.py --watch
+python3 test.py
 # 로컬 저장만 하려면
-python3 test.py --watch --no-upload
+python3 test.py --no-upload
 ```
 
-15초 간격으로 `queue/inbox/`를 확인하고 새 모델을 순서대로 처리합니다. 실행 중 추가한 모델도 다음 탐색 때 등록합니다. 일반 `python3 test.py`는 시작할 때 발견한 모델들을 처리한 뒤 종료합니다. `--watch`는 계속 기다리며, `Ctrl+C`로 종료합니다. SSH 접속을 닫아도 계속 실행하려면 `tmux` 세션 안에서 실행하세요.
+모델이 없을 때도 종료하지 않습니다. 대기 중에는 15초 간격으로 새 모델을 확인하고, 작업을 마치면 즉시 폴더를 다시 확인해 다음 모델을 실행합니다. 실행 중 추가한 모델도 자동 처리합니다. `--watch`는 같은 동작을 하는 기존 호환 옵션입니다. `Ctrl+C`로 종료합니다.
+
+현재 들어 있는 목록만 처리한 뒤 종료하려면 `--once`를 사용합니다.
+
+```bash
+python3 test.py --once --no-upload
+```
+
+SSH 접속을 닫아도 계속 실행하려면 `tmux`에서 실행합니다. 아래 예시는 `code/` 안에 파일을 저장한 구조 기준입니다.
+
+```bash
+tmux new -s rtdetr
+python3 code/test.py --no-upload
+```
+
+`Ctrl+B`를 누른 뒤 `D`를 누르면 평가기를 유지한 채 세션에서 나옵니다. 다시 확인하려면 `tmux attach -t rtdetr`를 사용합니다.
+
+## 메모장으로 볼 수 있는 현재 상태
+
+`queue/status.txt`는 UTF-8 텍스트이며 **작업 중에도 최대 5초 간격으로 갱신**됩니다. 예를 들어 다음처럼 표시합니다.
+
+```text
+RT-DETR 모델 평가 서버 상태
+갱신 시각: 2026-11-05 18:30:00 KST
+상태: 작업 실행 중
+실행 중인 모델: user1_v1.onnx
+현재 단계: CPU 추론
+대기 중인 모델: 2건
+  1. user2_v1.onnx
+  2. user3_v2.onnx
+추론 진행: 250/1000장
+전송 중(.part): 1건
+누적 완료: 3건
+누적 실패(자동 반복 안 함): 0건
+```
+
+실행 중인 작업과 대기 모델이 모두 없으면 **“바로 사용 가능 — 새 모델을 기다리는 중”**으로 표시합니다. 실패한 모델은 자동으로 무한 반복하지 않으므로 실패 이력이 있어도 새 모델을 받을 수 있습니다. 전송 중 파일과 잘못된 파일명은 대기 건수와 구분합니다. 실행 중 도착한 새 파일도 다음 작업 시작 전부터 대기 목록에 표시합니다.
+
+```bash
+# 다른 SSH 터미널에서 내용 확인
+cat queue/status.txt
+
+# 2초마다 화면을 새로 표시
+watch -n 2 cat queue/status.txt
+
+# 설치나 평가를 새로 실행하지 않고 현재 TXT 표시
+python3 code/test.py --queue-status
+```
+
+정상 종료하면 “종료됨 — 자동 실행하지 않습니다”로 바뀝니다. 강제 종료·전원 차단 시 마지막 내용이 남을 수 있으므로 갱신 시각도 확인하세요. 상태 확인은 폴더의 파일명·크기·수정 시각을 읽으며, 추론 중에 다른 모델을 로드하거나 전체 모델 해시를 계산하지 않습니다. 추론 진행 장수는 기존 로그의 25장 단위와 마지막 이미지 완료 시점을 따라 최대 5초 간격으로 표시됩니다.
 
 **업로드 중인 파일을 잘못 읽지 않도록** 전송할 때는 `.part`로 끝나는 이름을 쓰고, 전송이 끝난 뒤 같은 폴더에서 최종 이름으로 바꾸세요. `.part` 파일은 평가하지 않습니다.
 
@@ -100,10 +152,10 @@ python3 test.py --watch --no-upload
 python3 test.py --queue-status
 
 # 실패한 모델도 다시 시도; 성공한 모델은 유지
-python3 test.py --queue --retry-failed
+python3 test.py --once --retry-failed
 
 # inbox 안의 모델 중 지정한 것만 이 순서로 평가
-python3 test.py --queue --models user3_v1.onnx user1_v1.onnx
+python3 test.py --once --models user3_v1.onnx user1_v1.onnx
 ```
 
 `completed`, `failed`, `interrupted`, `pending`, `running`을 `queue/state.json`에 기록하고 `summary.csv`에 결과 폴더·ZIP 경로를 정리합니다. 한 모델이 실패해도 오류 로그/가능한 결과 ZIP을 남긴 뒤 다음 모델로 넘어갑니다. 파일명/경로가 잘못된 항목은 `rejected`에 기록합니다. 공통 데이터 준비 자체가 실패하면 모델 평가는 시작하지 않고, 원인을 해결한 다음 다시 실행합니다.

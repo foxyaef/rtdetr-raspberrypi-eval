@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Copy only this file, edit MODEL_NAME, then run: python3 test.py.
+"""Copy only this file, then run: python3 test.py.
 
 All evaluator code is embedded. Folders, a private Python environment and the
 fixed COCO subset are prepared for the current workspace/SSH account.
+The default queue service keeps watching queue/inbox/ and writes queue/status.txt.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ import venv
 import zlib
 
 # -------- 이 부분만 변경하세요 --------
-MODEL_NAME = "user1_v1.onnx"
+MODEL_NAME = "user1_v1.onnx"  # 기존 설정 호환용; 대기열에서는 사용하지 않음
 GITHUB_REPOSITORY = "foxyaef/rtdetr-raspberrypi-eval"
 UPLOAD_TO_GITHUB = True
 CPU_THREADS = 4
@@ -276,7 +277,7 @@ def setup_lock(root):
 
 HELP = """RT-DETR standalone evaluator - copy only this test.py.
 
-python3 test.py                         prepare folders/packages/COCO, then evaluate
+python3 test.py                         keep watching queue/inbox/ and evaluate arrivals
 python3 test.py --setup-only            prepare environment and images only
 python3 test.py --model user2_v1.onnx    select another model in models/
 python3 test.py --limit 3 --no-upload    first smoke check without GitHub upload
@@ -288,6 +289,7 @@ python3 test.py --queue --models user2_v1.onnx user1_v1.onnx  explicit order
 python3 test.py --queue --retry-failed  retry failed/interrupted jobs
 python3 test.py --queue-status         inspect saved queue without setup
 python3 test.py --watch                keep watching queue/inbox/ for new models
+python3 test.py --once                 process the current queue, then exit
 
 Optional: --data-dir PATH, --no-download, --threads N, --repo owner/repository.
 --use-current-python skips private-venv creation only if all pinned packages match.
@@ -296,6 +298,7 @@ The workspace is the script's folder, or the parent folder when the script is
 inside code/. All queued models in one workspace share data and environment.
 Git/Git LFS are device-level tools; GitHub write authentication remains per account.
 Without a power meter electrical power is recorded as null.
+Live readable status: queue/status.txt (updates even during inference).
 """
 
 
@@ -315,7 +318,7 @@ def launch(argv=None):
         _private_directory(root / name)
     _private_directory(root / "queue/inbox")
     if "--queue-status" in forwarded:
-        state = root / "queue/state.json"
+        state = root / "queue/status.txt"
         print(state.read_text(encoding="utf-8") if state.exists() else "Queue has not been started.")
         return 0
     with setup_lock(root):

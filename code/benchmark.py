@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import statistics
 import subprocess
@@ -317,13 +318,16 @@ def score_worker(config):
     write_json(output/"accuracy.json",scores)
 
 
-def run_stage(stage, config_path, output):
+def run_stage(stage, config_path, output, progress=None):
     command=[sys.executable,"-u",str(Path(__file__).resolve()),"--worker",stage,"--config",str(config_path)]
     with (output/(stage+".log")).open("w",encoding="utf-8") as log:
         with subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding="utf-8",errors="replace") as child:
             try:
                 for line in child.stdout:
                     log.write(line); print(line.rstrip(),flush=True)
+                    if progress is not None and stage=="infer":
+                        match=re.fullmatch(r"Inference (\d+)/(\d+)",line.strip())
+                        if match: progress({"stage":stage,"image_current":int(match[1]),"image_total":int(match[2])})
                 returncode=child.wait()
             except KeyboardInterrupt:
                 child.terminate(); child.wait(); raise
@@ -369,6 +373,7 @@ def main(argv=None):
     parser.add_argument("--queue",action="store_true",help="Evaluate queue/inbox/ in filename order")
     parser.add_argument("--models",nargs="+",help="Queue filenames in the desired order")
     parser.add_argument("--watch",action="store_true",help="Keep checking queue/inbox/ for new models")
+    parser.add_argument("--once",action="store_true",help="Process the current queue only, then exit")
     parser.add_argument("--poll-seconds",type=float,default=15)
     parser.add_argument("--retry-failed",action="store_true")
     parser.add_argument("--queue-status",action="store_true")
@@ -393,7 +398,7 @@ def main(argv=None):
         return 0
     from model_queue import evaluation_lock, interrupt_signals, run_queue
     if args.queue_status:
-        state=ROOT/"queue/state.json"
+        state=ROOT/"queue/status.txt"
         print(state.read_text(encoding="utf-8") if state.exists() else "Queue has not been started.")
         return 0
     for folder in [ROOT/"code", ROOT/"models", args.results_dir]:
@@ -407,23 +412,23 @@ def main(argv=None):
         parser.error("limit=1..1000, repeats=1..5, threads=1..64")
     if not 2<=args.poll_seconds<=60: parser.error("poll-seconds=2..60")
     if sys.maxsize<=2**32:parser.error("Use a 64-bit OS and 64-bit Python for ONNX Runtime")
-    queue_requested=args.queue or args.watch or bool(args.models) or args.retry_failed
+    if args.once and args.watch: parser.error("--once cannot be combined with --watch")
+    queue_requested=args.queue or args.watch or args.once or bool(args.models) or args.retry_failed
     if args.model and queue_requested: parser.error("Choose --model or a queue, not both")
     inbox=ROOT/"queue/inbox"
-    automatic=not args.model and not args.upload_only and inbox.is_dir() and any(
-        p.suffix.lower() in (".onnx",".onix") for p in inbox.iterdir())
+    automatic=not args.model and not args.upload_only
     if args.upload_only and queue_requested: parser.error("--upload-only cannot be combined with a queue")
     if queue_requested or automatic:
         settings={"limit":args.limit,"repeats":args.repeats,"threads":args.threads,
                   "data_dir":str(args.data_dir.resolve()),"results_dir":str(args.results_dir.resolve()),
                   "protocol_sha256":sha256(PROTOCOL_PATH),
                   "runtime_bundle_sha256":os.environ.get("RTDETR_BUNDLE_SHA256",sha256(__file__))}
-        def evaluate(name,digest,prepared):
-            return evaluate_model(args,name=name,model_directory=inbox,expected_sha=digest,prepared=prepared)
+        def evaluate(name,digest,prepared,progress):
+            return evaluate_model(args,name=name,model_directory=inbox,expected_sha=digest,prepared=prepared,progress=progress)
         with evaluation_lock(ROOT), interrupt_signals():
             return run_queue(ROOT,settings,
                 lambda:prepare_data(args.data_dir.resolve(),download=not args.no_download),evaluate,
-                names=args.models,retry_failed=args.retry_failed,watch=args.watch,poll_seconds=args.poll_seconds)
+                names=args.models,retry_failed=args.retry_failed,watch=not args.once,poll_seconds=args.poll_seconds)
     if args.upload_only:
         output=args.upload_only.resolve(); provenance=read_json(output/"provenance.json")
         model=ROOT/provenance.get("model_relative_path","models/"+provenance["model_name"])
@@ -438,7 +443,7 @@ def main(argv=None):
         return evaluate_model(args,name=args.model or MODEL_NAME)["returncode"]
 
 
-def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=None):
+def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=None,progress=None):
     from github_upload import infer_user, _is_link
     from coco_data import prepare_data
     model_directory=Path(model_directory or ROOT/"models")
@@ -447,11 +452,11 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
     if Path(name).name!=name or _is_link(model):
         raise ValueError("Put the selected single-file model in its input folder and pass its filename")
     if not model.exists():
+        if expected_sha: raise ValueError("Queued model was removed before evaluation")
         print("Model not found; preparing the account-local environment/data first.",flush=True)
         prepare_data(args.data_dir.resolve(),download=not args.no_download)
         print("Preparation complete. Put your model at:",model,flush=True)
         print("Then run the same test.py command again. No benchmark or upload was performed.",flush=True)
-        if expected_sha: raise ValueError("Queued model was removed before evaluation")
         return {"returncode":0,"status":"not_started"}
     if not model.is_file(): raise ValueError("The selected model must be a regular file")
     model=model.resolve(); source_hash=sha256(model)
@@ -463,6 +468,7 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
     config={"model_path":str(model),"result_dir":str(output),"data_dir":str(args.data_dir.resolve()),
             "limit":args.limit,"repeats":args.repeats,"threads":args.threads}
     config_path=output/"run_config.json"; write_json(config_path,config)
+    if progress: progress({"stage":"data_preparation","result_dir":str(output)})
     write_json(output/"system_info.json",system_info())
     write_json(output/"provenance.json",{"model_name":model.name,"model_sha256":source_hash,"user_branch":user,
                "model_relative_path":model.relative_to(ROOT).as_posix(),
@@ -481,7 +487,11 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
         shutil.copy2(PROTOCOL_PATH,output/"protocol.json")
         for stage in ["audit","infer","score"]:
             write_json(output/"evaluation_state.json",{"status":"running","stage":stage})
-            print("Stage:",stage,flush=True); run_stage(stage,config_path,output)
+            if progress:
+                event={"stage":stage}
+                if stage=="infer": event.update(image_current=0,image_total=args.limit)
+                progress(event)
+            print("Stage:",stage,flush=True); run_stage(stage,config_path,output,progress=progress)
         if sha256(model)!=source_hash:raise RuntimeError("Model file changed while evaluation was running")
         resource=read_json(output/"inference_metrics.json"); accuracy=read_json(output/"accuracy.json")
         metrics={**accuracy,"resource":resource,"model_file_bytes":model.stat().st_size,
@@ -504,7 +514,9 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
             error.result_dir=str(output); error.archive_path=archive; raise
         return {"returncode":1,"result_dir":str(output),"archive_path":archive,"error":str(error),"upload_status":"not_attempted"}
     should_upload=UPLOAD_TO_GITHUB and not args.no_upload
+    if progress: progress({"stage":"packaging"})
     archive=package_results(output)
+    if progress and should_upload: progress({"stage":"upload"})
     okay=upload(model,output,args.repo,archive) if should_upload else True
     if not should_upload:write_json(output/"upload_status.json",{"status":"disabled"})
     return {"returncode":0 if okay else 2,"result_dir":str(output),"archive_path":archive,

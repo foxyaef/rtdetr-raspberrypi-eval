@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import threading
 import time
 import uuid
 
@@ -85,7 +86,11 @@ def interrupt_signals():
         for number, handler in previous.items(): signal.signal(number, handler)
 
 
-def scan_models(inbox, names=None):
+def file_signature(info):
+    return (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino, info.st_dev)
+
+
+def scan_models(inbox, names=None, cache=None):
     inbox = Path(inbox)
     selected = list(names) if names else sorted(
         p.name for p in inbox.iterdir() if p.suffix.lower() in (".onnx", ".onix"))
@@ -97,11 +102,14 @@ def scan_models(inbox, names=None):
             infer_user(path)
             if _is_link(path) or not path.is_file(): raise ValueError("Expected a regular model file")
             before = path.stat()
-            digest = _sha256(path)
+            cached = (cache or {}).get(name)
+            digest = cached[1] if cached and cached[0] == file_signature(before) else _sha256(path)
             after = path.stat()
-            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            if file_signature(before) != file_signature(after):
                 raise ValueError("Model is still changing; upload as .part and rename when finished")
-            snapshots.append({"model_name": name, "model_sha256": digest, "model_file_bytes": after.st_size})
+            if cache is not None: cache[name] = (file_signature(after), digest)
+            snapshots.append({"model_name": name, "model_sha256": digest, "model_file_bytes": after.st_size,
+                              "file_signature": list(file_signature(after))})
         except (ValueError, RuntimeError, OSError) as error:
             rejected.append({"model_name": name, "error": str(error)})
     return snapshots, rejected
@@ -112,21 +120,167 @@ def job_key(snapshot, settings):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+class QueueStatus:
+    """Low-overhead status heartbeat: directory metadata only, never model hashing.
+
+    The monitor remains active during an inference subprocess, so newly arrived
+    models appear in status.txt without loading another model or interrupting it.
+    """
+    STAGES = {"starting": "대기열 확인 중", "preparing": "공통 이미지 준비·검증 중",
+              "data_preparation": "데이터 확인", "audit": "ONNX 모델 검사",
+              "infer": "CPU 추론", "score": "mAP 계산", "packaging": "결과 ZIP 생성",
+              "upload": "GitHub 업로드", "ready": "새 모델 기다리는 중",
+              "stopped": "프로그램 종료", "error": "오류 확인 필요"}
+
+    def __init__(self, root, *, watch, poll_seconds, names=None, interval=5):
+        self.directory = Path(root) / "queue"
+        self.inbox = self.directory / "inbox"
+        self.watch, self.poll_seconds, self.names = watch, poll_seconds, set(names) if names else None
+        self.interval = min(interval, poll_seconds)
+        self.lock = threading.RLock()
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.known = {}
+        self.model = None
+        self.phase = "starting"
+        self.image_current = self.image_total = None
+        self.completed = self.failed = 0
+        self.reason = ""
+        self.error = None
+
+    def sync_jobs(self, snapshots, jobs, settings):
+        by_id = {job["id"]: job for job in jobs}
+        with self.lock:
+            self.known = {item["model_name"]: {
+                "signature": tuple(item["file_signature"]),
+                "status": by_id[job_key(item, settings)]["status"]} for item in snapshots}
+            self.completed = sum(job["status"] == "completed" for job in jobs)
+            self.failed = sum(job["status"] == "failed" for job in jobs)
+
+    def activity(self, phase, model=None, *, refresh=True, image_current=None, image_total=None):
+        with self.lock:
+            if model != self.model:
+                self.image_current = self.image_total = None
+            self.phase, self.model = phase, model
+            if image_current is not None: self.image_current = image_current
+            if image_total is not None: self.image_total = image_total
+        if refresh: self.refresh()
+
+    def refresh(self):
+        with self.lock:
+            waiting, invalid, transferring = [], [], 0
+            inventory_error = None
+            try:
+                for path in sorted(self.inbox.iterdir(), key=lambda value: value.name):
+                    if path.name.endswith(".part"):
+                        transferring += 1; continue
+                    if path.suffix.lower() not in (".onnx", ".onix"): continue
+                    if self.names is not None and path.name not in self.names: continue
+                    try:
+                        infer_user(path)
+                        if _is_link(path) or not path.is_file(): raise ValueError("not a regular file")
+                        signature = file_signature(path.stat())
+                        known = self.known.get(path.name)
+                        if known and known["signature"] == signature:
+                            if known["status"] in ("completed", "failed"): continue
+                            if path.name == self.model: continue
+                        waiting.append(path.name)
+                    except (OSError, ValueError, RuntimeError): invalid.append(path.name)
+            except OSError as error:
+                inventory_error = str(error)
+            stopped = self.phase in ("stopped", "error")
+            if stopped:
+                label = "종료됨 — 자동 실행하지 않습니다" if self.phase == "stopped" else "오류로 종료됨"
+            elif inventory_error:
+                label = "대기열 폴더 확인 오류 — 사용 가능 여부 확인 필요"
+            elif self.model:
+                label = "작업 실행 중"
+            elif self.phase == "preparing":
+                label = "공통 환경 준비 중"
+            elif self.phase == "starting":
+                label = "대기열 확인 중"
+            elif waiting:
+                label = "대기 작업 있음 — 순서대로 자동 실행 예정"
+            else:
+                label = "바로 사용 가능 — 새 모델을 기다리는 중"
+            kst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
+            lines = ["RT-DETR 모델 평가 서버 상태", f"갱신 시각: {kst}", f"상태: {label}",
+                     f"실행 중인 모델: {self.model or '없음'}",
+                     f"현재 단계: {self.STAGES.get(self.phase, self.phase)}",
+                     f"대기 중인 모델: {len(waiting)}건"]
+            lines += [f"  {index}. {name}" for index, name in enumerate(waiting, 1)]
+            if self.image_current is not None:
+                lines.append(f"추론 진행: {self.image_current}/{self.image_total}장")
+            lines += [f"전송 중(.part): {transferring}건", f"누적 완료: {self.completed}건",
+                      f"누적 실패(자동 반복 안 함): {self.failed}건", f"파일명/형식 확인 필요: {len(invalid)}건"]
+            lines += [f"  확인 필요: {name}" for name in invalid]
+            lines += [f"감시 모드: {'계속 대기' if self.watch else '현재 목록만 처리'}",
+                      f"새 모델 탐색 간격: {self.poll_seconds}초", f"상태 갱신 간격: 최대 {self.interval}초",
+                      f"프로세스 PID: {os.getpid()}", f"결과 저장 위치: {self.directory.parent / 'results'}",
+                      "갱신 시각이 오래 멈췄다면 프로그램이 실행 중인지 확인하세요."]
+            if self.reason: lines.append("안내: " + self.reason)
+            if inventory_error: lines.append("폴더 오류: " + inventory_error)
+            destination = self.directory / "status.txt"
+            if _is_link(destination): raise RuntimeError("Queue status must not be a symlink")
+            temporary = self.directory / (".status_" + uuid.uuid4().hex + ".tmp")
+            try:
+                temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                # Windows readers can briefly deny replacement while opening the
+                # TXT. Keep atomic writes and retry that transient sharing lock.
+                for attempt in range(10):
+                    try:
+                        os.replace(temporary, destination)
+                        break
+                    except PermissionError:
+                        if os.name != "nt" or attempt == 9: raise
+                        time.sleep(.025)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def start(self):
+        self.refresh()
+        def loop():
+            while not self.stop_event.wait(self.interval):
+                try: self.refresh()
+                except Exception as error:
+                    self.error = str(error)
+                    print("Status update failed:", self.error, flush=True)
+                    return
+        self.thread = threading.Thread(target=loop, name="queue-status", daemon=True)
+        self.thread.start()
+
+    def close(self, phase="stopped", reason=""):
+        self.stop_event.set()
+        if self.thread is not None: self.thread.join(timeout=10)
+        with self.lock:
+            self.phase, self.model, self.reason = phase, None, reason
+        self.refresh()
+
+
 def run_queue(root, settings, prepare, evaluate, *, names=None, retry_failed=False,
               watch=False, poll_seconds=15):
-    """Caller holds evaluation_lock. evaluate(name, sha, prepared) returns a run receipt."""
+    """Caller holds evaluation_lock. evaluate(name, sha, prepared, progress) returns a receipt."""
     directory = Path(root) / "queue"
     inbox = directory / "inbox"
     for folder in (directory, inbox):
         if _is_link(folder): raise RuntimeError("Queue directories cannot be symlinks/junctions")
         folder.mkdir(parents=True, exist_ok=True)
     state = load_state(directory)
+    state["service"] = {"pid": os.getpid(), "status": "running", "started_at_utc": now(), "watch": watch}
+    monitor = QueueStatus(root, watch=watch, poll_seconds=poll_seconds, names=names)
+    monitor.start()
     prepared = None
+    cache = {}
     attempted = set()  # A failed watch job must not be retried forever in one invocation.
     issues = False
+    final_phase, final_reason = "stopped", "지정한 모델 처리가 끝났습니다."
+    selected_names = names
     try:
         while True:
-            snapshots, rejected = scan_models(inbox, names)
+            if monitor.error: raise RuntimeError("Status file could not be updated: " + monitor.error)
+            snapshots, rejected = scan_models(inbox, selected_names, cache)
+            if not watch and selected_names is None:
+                selected_names = [item["model_name"] for item in snapshots]
             state["rejected"] = rejected
             for item in rejected: print("Queue skipped:", item["model_name"], item["error"], flush=True)
             issues |= bool(rejected)
@@ -146,18 +300,33 @@ def run_queue(root, settings, prepare, evaluate, *, names=None, retry_failed=Fal
                     job.update(status="pending", error="Local result artifact is missing; evaluating again")
                 if job["status"] == "failed" and not retry_failed:
                     issues = True; continue
-                if key not in attempted: current.append(job)
+                if key not in attempted:
+                    job["status"] = "pending"
+                    current.append(job)
+            monitor.sync_jobs(snapshots, state["jobs"], settings)
             save_state(directory, state)
             if current and prepared is None:
+                monitor.activity("preparing")
                 print("Queue: verifying/preparing shared COCO data once.", flush=True)
                 prepared = prepare()
-            for index, job in enumerate(current, 1):
+            # Rescan after each job, including new arrivals during the last inference.
+            for job in current[:1]:
                 attempted.add(job["id"])
                 job.update(status="running", started_at_utc=now(), attempts=job["attempts"] + 1, error=None)
                 save_state(directory, state)
-                print(f"Queue {index}/{len(current)}: {job['model_name']}", flush=True)
+                monitor.sync_jobs(snapshots, state["jobs"], settings)
+                monitor.activity("audit", job["model_name"])
+                print(f"Queue: {job['model_name']} (waiting {len(current)-1})", flush=True)
+                def progress(event):
+                    phase = event.get("stage", job.get("stage", "audit"))
+                    if "result_dir" in event: job["result_dir"] = event["result_dir"]
+                    stage_changed = phase != job.get("stage")
+                    job["stage"] = phase
+                    monitor.activity(phase, job["model_name"], refresh=stage_changed,
+                        image_current=event.get("image_current"), image_total=event.get("image_total"))
+                    if stage_changed: save_state(directory, state)
                 try:
-                    outcome = evaluate(job["model_name"], job["model_sha256"], prepared)
+                    outcome = evaluate(job["model_name"], job["model_sha256"], prepared, progress)
                     job.update(outcome)
                     job["status"] = "completed" if outcome["returncode"] in (0, 2) else "failed"
                     if outcome["returncode"]: issues = True
@@ -172,15 +341,24 @@ def run_queue(root, settings, prepare, evaluate, *, names=None, retry_failed=Fal
                 finally:
                     job["finished_at_utc"] = now()
                     save_state(directory, state)
+                    monitor.sync_jobs(snapshots, state["jobs"], settings)
+            monitor.activity("ready")
+            if current: continue
             if not watch: break
             print(f"Queue waiting: {inbox} (poll {poll_seconds}s; Ctrl+C to stop)", flush=True)
             time.sleep(poll_seconds)
     except KeyboardInterrupt:
+        final_reason = "사용자가 중단했습니다. 다음 실행에서 중단된 작업을 다시 시도합니다."
         save_state(directory, state)
         print("Queue stopped; saved state:", directory / "state.json", flush=True)
         return 130
-    except Exception:
+    except Exception as error:
+        final_phase, final_reason = "error", str(error)
         save_state(directory, state)
         raise
+    finally:
+        state["service"].update(status=final_phase, finished_at_utc=now())
+        save_state(directory, state)
+        monitor.close(final_phase, final_reason)
     print("Queue finished. Status:", directory / "state.json", "Summary:", directory / "summary.csv", flush=True)
     return 1 if issues else 0

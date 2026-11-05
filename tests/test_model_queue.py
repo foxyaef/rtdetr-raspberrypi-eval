@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import zipfile
@@ -28,10 +29,11 @@ class QueueTests(unittest.TestCase):
     def add(self,name,content=b'model fixture'):
         (self.inbox/name).write_bytes(content)
 
-    def evaluate(self,name,digest,prepared):
+    def evaluate(self,name,digest,prepared,progress):
         self.assertIs(prepared,self.prepared)
         self.assertEqual(digest,queue._sha256(self.inbox/name))
         self.calls.append(name)
+        progress({'stage':'infer','image_current':1,'image_total':3})
         output=self.root/'results'/(Path(name).stem+f'_{len(self.calls)}')
         output.mkdir(parents=True)
         archive=Path(str(output)+'.zip');archive.write_bytes(b'fixture archive')
@@ -90,6 +92,98 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(self.run_queue(watch=True,poll_seconds=2)[0],130)
         self.assertEqual(self.calls,['user1_v1.onnx','user2_v1.onix'])
 
+    def test_default_cli_watches_empty_inbox_and_once_is_explicit(self):
+        spec=importlib.util.spec_from_file_location('queue_cli_benchmark',ROOT/'code/benchmark.py')
+        engine=importlib.util.module_from_spec(spec);spec.loader.exec_module(engine)
+        with mock.patch.object(engine,'ROOT',self.root), mock.patch.object(queue,'run_queue',return_value=0) as run:
+            self.assertEqual(engine.main(['--no-upload','--no-download']),0)
+            self.assertTrue(run.call_args.kwargs['watch'])
+            self.assertEqual(engine.main(['--once','--no-upload','--no-download']),0)
+            self.assertFalse(run.call_args.kwargs['watch'])
+        with self.assertRaises(SystemExit),mock.patch.object(engine,'ROOT',self.root):
+            engine.main(['--once','--watch','--no-download'])
+
+    def test_txt_heartbeat_detects_arrivals_while_model_is_busy(self):
+        self.add('user1_v1.onnx')
+        original=queue.QueueStatus
+        original_sleep=time.sleep
+        def status(*args,**kwargs):return original(*args,**kwargs,interval=.02)
+        def sleep(seconds):
+            if seconds==15:raise KeyboardInterrupt
+            original_sleep(seconds)
+        def evaluate(name,digest,prepared,progress):
+            progress({'stage':'infer','image_current':25,'image_total':1000})
+            if name=='user1_v1.onnx':
+                self.add('user2_v1.onix')
+                deadline=time.monotonic()+3
+                while time.monotonic()<deadline:
+                    text=(self.root/'queue/status.txt').read_text(encoding='utf-8')
+                    if '대기 중인 모델: 1건' in text and 'user2_v1.onix' in text:break
+                    time.sleep(.01)
+                else:self.fail('New arrival was not displayed while inference was active')
+                self.assertIn('실행 중인 모델: user1_v1.onnx',text)
+                self.assertIn('추론 진행: 25/1000장',text)
+                self.assertNotIn('바로 사용 가능',text)
+            return self.evaluate(name,digest,prepared,progress)
+        with mock.patch.object(queue,'QueueStatus',side_effect=status),mock.patch.object(queue.time,'sleep',side_effect=sleep):
+            self.assertEqual(self.run_queue(evaluate=evaluate,watch=True)[0],130)
+        self.assertEqual(self.calls,['user1_v1.onnx','user2_v1.onix'])
+        self.assertIn('종료됨',(self.root/'queue/status.txt').read_text(encoding='utf-8'))
+
+    def test_idle_status_says_ready_but_stopped_status_does_not(self):
+        self.add('user1_v1.onnx.part');self.add('user8_invalid.onnx')
+        status=queue.QueueStatus(self.root,watch=True,poll_seconds=15)
+        status.activity('ready')
+        text=(self.root/'queue/status.txt').read_text(encoding='utf-8')
+        self.assertIn('바로 사용 가능',text)
+        self.assertIn('대기 중인 모델: 0건',text)
+        self.assertIn('전송 중(.part): 1건',text)
+        self.assertIn('파일명/형식 확인 필요: 1건',text)
+        status.close(reason='test stop')
+        text=(self.root/'queue/status.txt').read_text(encoding='utf-8')
+        self.assertIn('종료됨',text);self.assertNotIn('바로 사용 가능',text)
+
+    def test_status_excludes_completed_and_failed_jobs_from_waiting_count(self):
+        for name in ['user1_v1.onnx','user2_v1.onnx','user3_v1.onnx']:self.add(name)
+        snapshots,_=queue.scan_models(self.inbox)
+        jobs=[{**item,'id':queue.job_key(item,{}),'status':phase}
+              for item,phase in zip(snapshots,['completed','failed','pending'])]
+        status=queue.QueueStatus(self.root,watch=True,poll_seconds=15)
+        status.sync_jobs(snapshots,jobs,{})
+        status.activity('ready')
+        text=(self.root/'queue/status.txt').read_text(encoding='utf-8')
+        self.assertIn('대기 중인 모델: 1건',text)
+        self.assertIn('1. user3_v1.onnx',text)
+        self.assertIn('누적 완료: 1건',text)
+        self.assertIn('누적 실패(자동 반복 안 함): 1건',text)
+
+    def test_unchanged_models_are_not_rehashed_at_every_idle_poll(self):
+        self.add('user1_v1.onnx');cache={}
+        with mock.patch.object(queue,'_sha256',wraps=queue._sha256) as digest:
+            first,_=queue.scan_models(self.inbox,cache=cache)
+            second,_=queue.scan_models(self.inbox,cache=cache)
+            self.assertEqual(digest.call_count,1)
+            self.assertEqual(first,second)
+            self.add('user1_v1.onnx',b'a new model version')
+            third,_=queue.scan_models(self.inbox,cache=cache)
+            self.assertEqual(digest.call_count,2)
+            self.assertNotEqual(first[0]['model_sha256'],third[0]['model_sha256'])
+
+    def test_status_atomic_replace_retries_a_transient_windows_reader(self):
+        status=queue.QueueStatus(self.root,watch=True,poll_seconds=15)
+        replace=queue.os.replace
+        attempts=[]
+        def sharing_lock(source,destination):
+            attempts.append(1)
+            if len(attempts)==1:raise PermissionError('temporary sharing violation')
+            return replace(source,destination)
+        with mock.patch.object(queue.os,'name','nt'),mock.patch.object(queue.os,'replace',side_effect=sharing_lock), \
+             mock.patch.object(queue.time,'sleep') as pause:
+            status.refresh()
+        self.assertEqual(len(attempts),2)
+        pause.assert_called_once_with(.025)
+        self.assertIn('RT-DETR',(self.root/'queue/status.txt').read_text(encoding='utf-8'))
+
     def test_os_lock_blocks_another_process_and_releases(self):
         command=[sys.executable,'-c',
             'import sys;sys.path.insert(0,sys.argv[1]);from model_queue import evaluation_lock;'
@@ -129,7 +223,7 @@ class QueueTests(unittest.TestCase):
         model.ir_version=10
         for name in ['user1_fixture.onnx','user3_fixture.onix']:onnx.save(model,self.inbox/name)
         self.add('user2_broken.onnx',b'not an ONNX model')
-        command=[sys.executable,str(script),'--use-current-python','--no-download','--no-upload',
+        command=[sys.executable,str(script),'--use-current-python','--once','--no-download','--no-upload',
                  '--data-dir',os.environ['COCO_DATA_DIR'],'--limit','2','--threads','1']
         result=subprocess.run(command,cwd=self.root,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=240)
         self.assertEqual(result.returncode,1,result.stdout+'\n'+result.stderr)
