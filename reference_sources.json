@@ -1,0 +1,26 @@
+{
+  "repository": "foxyaef/haiteam4_finetune",
+  "files": [
+    {
+      "url": "https://github.com/foxyaef/haiteam4_finetune/blob/main/colab/COCO_Eval.ipynb",
+      "blob_sha": "52fe5e6afc3c02a301eff3d6ed6da7b9a9680487"
+    },
+    {
+      "url": "https://github.com/foxyaef/haiteam4_finetune/blob/main/prepare_data.py",
+      "blob_sha": "cbd9b7872fef9d01b3a4eacfa0be4c56660035d5"
+    },
+    {
+      "url": "https://github.com/foxyaef/haiteam4_finetune/blob/main/scripts/metrics.py",
+      "blob_sha": "9acba98ef72f121e033d501b80ea277e46f68b8e"
+    },
+    {
+      "url": "https://github.com/foxyaef/haiteam4_finetune/blob/main/protocol.json",
+      "blob_sha": "f625c38e11c16d1f5969eec9d0cff8998ce665fd"
+    }
+  ],
+  "adaptations": [
+    "Separate warmup and all selected images timed (matches corrected Colab used for historical runs).",
+    "CPU-only execution, low-memory streaming predictions, per-stage latency and CPU/RSS measurement.",
+    "COCO scorer adds explicit image_ids selection for smoke runs; full evaluation retains original 1000-image AP rules."
+  ]
+}
