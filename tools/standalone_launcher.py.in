@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""Copy only this file, edit MODEL_NAME, then run: python3 test.py.
+
+All evaluator code is embedded. Folders, a private Python environment and the
+fixed COCO subset are prepared for the current workspace/SSH account.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from urllib.parse import urlsplit
+import venv
+import zlib
+
+# -------- 이 부분만 변경하세요 --------
+MODEL_NAME = "user1_v1.onnx"
+GITHUB_REPOSITORY = "foxyaef/rtdetr-raspberrypi-eval"
+UPLOAD_TO_GITHUB = True
+CPU_THREADS = 4
+LATENCY_REPEATS = 1
+# ------------------------------------
+BUNDLE_SHA256 = "@@BUNDLE_SHA256@@"
+BUNDLE_DATA = (
+@@PAYLOAD_LINES@@
+)
+MAX_BUNDLE_BYTES = 2 * 1024 * 1024
+EXPECTED_FILES = frozenset({
+    "code/benchmark.py", "code/coco_data.py", "code/coco_metrics.py",
+    "code/github_upload.py", "protocol.json", "requirements.txt",
+})
+ENVIRONMENT_MARKER = ".rtdetr_bootstrap_environment.json"
+GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+
+
+def _is_link(path):
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def workspace_root(script_path=None):
+    script = Path(script_path if script_path is not None else __file__).resolve()
+    return script.parent.parent if script.parent.name == "code" else script.parent
+
+
+def _private_directory(path):
+    if _is_link(path):
+        raise RuntimeError(f"Refusing a symlink/junction for managed directory: {path}")
+    path.mkdir(mode=0o700, exist_ok=True)
+    if not path.is_dir():
+        raise RuntimeError(f"Expected a directory: {path}")
+
+
+def decode_bundle():
+    try:
+        compressed = base64.b64decode(BUNDLE_DATA, validate=True)
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, MAX_BUNDLE_BYTES + 1)
+        if len(raw) > MAX_BUNDLE_BYTES or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+            raise ValueError("Oversized, incomplete or trailing compressed payload")
+        if hashlib.sha256(raw).hexdigest() != BUNDLE_SHA256:
+            raise ValueError("Embedded bundle SHA256 mismatch")
+        bundle = json.loads(raw)
+        if bundle.get("format") != 1 or set(bundle.get("files", {})) != EXPECTED_FILES:
+            raise ValueError("Unexpected embedded file list")
+        for name, entry in bundle["files"].items():
+            if not isinstance(entry.get("content"), str):
+                raise ValueError("Embedded file must contain UTF-8 text")
+            if hashlib.sha256(entry["content"].encode("utf-8")).hexdigest() != entry.get("sha256"):
+                raise ValueError(f"Embedded file hash mismatch: {name}")
+        return bundle
+    except (ValueError, TypeError, KeyError, zlib.error) as error:
+        raise RuntimeError("This test.py is incomplete or damaged; copy the original file again.") from error
+
+
+def _atomic_bytes(path, payload):
+    if _is_link(path):
+        raise RuntimeError(f"Refusing to replace a symlink/junction: {path}")
+    descriptor, temporary = tempfile.mkstemp(prefix=".rtdetr_", dir=str(path.parent))
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+        temporary.replace(path)
+    finally:
+        if temporary.exists(): temporary.unlink()
+
+
+def _write_json(path, value):
+    _atomic_bytes(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+def materialize_bundle(root):
+    root = Path(root)
+    bundle = decode_bundle()
+    private = root / ".rtdetr_runtime"
+    _private_directory(private)
+    destination = private / BUNDLE_SHA256
+    _private_directory(destination)
+    _private_directory(destination / "code")
+    for name, entry in bundle["files"].items():
+        target = destination.joinpath(*name.split("/"))
+        if _is_link(target):
+            raise RuntimeError(f"Managed runtime file is a symlink/junction: {target}")
+        payload = entry["content"].encode("utf-8")
+        if target.exists():
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != entry["sha256"]:
+                raise RuntimeError(f"Managed runtime changed: {target}. Preserve your edits and use a fresh workspace.")
+        else:
+            _atomic_bytes(target, payload)
+    _write_json(destination / "bundle_manifest.json", {
+        "format": 1, "bundle_sha256": BUNDLE_SHA256,
+        "files": {name: item["sha256"] for name, item in bundle["files"].items()},
+    })
+    return destination
+
+
+def parse_requirements(path):
+    result = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"): continue
+        match = re.fullmatch(r"([A-Za-z0-9_.-]+)==([A-Za-z0-9_.+!-]+)", line)
+        if not match: raise RuntimeError("Only pinned package==version requirements are allowed")
+        result[match[1]] = match[2]
+    return result
+
+
+def _child_environment():
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONUSERBASE", None)
+    # Ambient pip config can redirect installs outside a virtual environment.
+    for name in list(env):
+        if name.startswith("PIP_"): env.pop(name)
+    env.update({"PYTHONNOUSERSITE": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INPUT": "1",
+                "PIP_CONFIG_FILE": os.devnull, "PIP_REQUIRE_VIRTUALENV": "true"})
+    return env
+
+
+def environment_versions(python, expected):
+    source = (
+        "import importlib.metadata as m,json,sys; names=json.loads(sys.argv[1]); out={}; "
+        "exec('for n in names:\\n try: out[n]=m.version(n)\\n except m.PackageNotFoundError: out[n]=None'); "
+        "print(json.dumps(out))"
+    )
+    result = subprocess.run([str(python), "-c", source, json.dumps(list(expected))],
+                            env=_child_environment(), capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("Could not inspect the selected Python environment: " + result.stderr[-1500:])
+    return json.loads(result.stdout)
+
+
+def _download_get_pip(path):
+    request = urllib.request.Request(GET_PIP_URL, headers={"User-Agent": "RT-DETR-standalone-setup/1"})
+    descriptor, temporary = tempfile.mkstemp(prefix=".get_pip_", dir=str(path.parent))
+    temporary = Path(temporary)
+    try:
+        size = 0
+        with os.fdopen(descriptor, "wb") as output, urllib.request.urlopen(request, timeout=90) as response:
+            endpoint = urlsplit(response.geturl())
+            if endpoint.scheme != "https" or endpoint.hostname != "bootstrap.pypa.io":
+                raise RuntimeError("Unexpected redirect for pip bootstrap")
+            while block := response.read(256 * 1024):
+                size += len(block)
+                if size > 8 * 1024 * 1024: raise RuntimeError("Unexpected pip bootstrap download size")
+                output.write(block)
+        if size < 1000: raise RuntimeError("Incomplete pip bootstrap download")
+        if _is_link(path): raise RuntimeError("pip bootstrap destination cannot be a symlink/junction")
+        temporary.replace(path)
+    finally:
+        if temporary.exists(): temporary.unlink()
+    return {"url": GET_PIP_URL, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def _verify_private_environment(python, directory):
+    source = "import json,sys; print(json.dumps({'prefix':sys.prefix,'base_prefix':sys.base_prefix,'version':list(sys.version_info[:2]),'bits':64 if sys.maxsize>2**32 else 32}))"
+    result = subprocess.run([str(python), "-c", source], env=_child_environment(),
+                            capture_output=True, text=True, timeout=60)
+    if result.returncode: raise RuntimeError("Private Python interpreter did not start")
+    info = json.loads(result.stdout)
+    if (Path(info["prefix"]).resolve() != directory.resolve()
+            or Path(info["prefix"]).resolve() == Path(info["base_prefix"]).resolve()
+            or info["bits"] != 64 or not (3, 11) <= tuple(info["version"]) <= (3, 13)):
+        raise RuntimeError("Private Python does not identify this folder as its virtual environment; no packages were installed")
+
+
+def ensure_environment(root, runtime, use_current=False):
+    root, runtime = Path(root), Path(runtime)
+    expected = parse_requirements(runtime / "requirements.txt")
+    if use_current:
+        actual = environment_versions(Path(sys.executable), expected)
+        if actual != expected:
+            raise RuntimeError("--use-current-python requires all exact package versions. Remove the option for automatic private-environment setup.")
+        _write_json(runtime / "installer_provenance.json", {
+            "mode": "explicit-current-python", "python": sys.executable,
+            "versions": actual, "system_python_modified": False,
+        })
+        return Path(sys.executable)
+    directory = root / ".rtdetr_venv"
+    marker = directory / ENVIRONMENT_MARKER
+    owned = {}
+    if _is_link(directory): raise RuntimeError("Private environment directory cannot be a symlink/junction")
+    if directory.exists():
+        if not directory.is_dir(): raise RuntimeError("Private environment path is not a directory")
+        if any(directory.iterdir()):
+            if _is_link(marker) or not marker.is_file():
+                raise RuntimeError("Existing .rtdetr_venv is not owned by this bootstrap; it will not be changed")
+            try: owned = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error: raise RuntimeError("Invalid private environment marker") from error
+            if owned.get("purpose") != "rtdetr-standalone" or owned.get("format") != 1:
+                raise RuntimeError("Existing .rtdetr_venv has an unrecognized owner marker")
+    else:
+        directory.mkdir(mode=0o700)
+    sources = [item for item in owned.get("bootstrap_downloads", [])
+               if isinstance(item, dict) and item.get("url") == GET_PIP_URL
+               and re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", "")))]
+    _write_json(marker, {"format": 1, "purpose": "rtdetr-standalone", "bootstrap_downloads": sources})
+    python = directory / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not python.is_file():
+        print("Preparing private Python environment:", directory, flush=True)
+        try: venv.EnvBuilder(with_pip=False, clear=False).create(directory)
+        except Exception as error:
+            raise RuntimeError("Python venv support is unavailable. An administrator must install python3-venv once for the device; user files were preserved.") from error
+    _verify_private_environment(python, directory)
+    actual = environment_versions(python, expected)
+    if actual != expected:
+        available = subprocess.run([str(python), "-m", "pip", "--version"],
+                                   env=_child_environment(), capture_output=True, text=True)
+        if available.returncode:
+            seeded = subprocess.run([str(python), "-m", "ensurepip", "--upgrade"],
+                                    env=_child_environment(), capture_output=True, text=True)
+            if seeded.returncode:
+                print("Installing pip inside the private environment using official PyPA bootstrap.", flush=True)
+                get_pip = runtime / "get-pip.py"
+                sources.append(_download_get_pip(get_pip))
+                subprocess.run([str(python), str(get_pip), "--index-url", "https://pypi.org/simple"],
+                               env=_child_environment(), check=True)
+        print("Installing the pinned evaluation packages (first setup/version change only).", flush=True)
+        subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+                        "--index-url", "https://pypi.org/simple", "-r", str(runtime / "requirements.txt")],
+                       env=_child_environment(), check=True)
+        actual = environment_versions(python, expected)
+        if actual != expected: raise RuntimeError("Installed packages do not match the pinned versions")
+    subprocess.run([str(python), "-m", "pip", "check"], env=_child_environment(), check=True)
+    _write_json(marker, {"format": 1, "purpose": "rtdetr-standalone", "bootstrap_downloads": sources})
+    _write_json(runtime / "installer_provenance.json", {
+        "mode": "private-venv", "python": str(python), "versions": actual,
+        "system_python_modified": False, "bootstrap_downloads": sources,
+    })
+    return python
+
+
+@contextmanager
+def setup_lock(root):
+    lock = Path(root) / ".rtdetr_setup.lock"
+    try: descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as error:
+        raise RuntimeError("Setup is already running in this workspace. If an earlier setup was interrupted, verify no setup is active before removing .rtdetr_setup.lock.") from error
+    try:
+        with os.fdopen(descriptor, "w") as stream: stream.write(str(os.getpid()))
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+HELP = """RT-DETR standalone evaluator - copy only this test.py.
+
+python3 test.py                         prepare folders/packages/COCO, then evaluate
+python3 test.py --setup-only            prepare environment and images only
+python3 test.py --model user2_v1.onnx    select another model in models/
+python3 test.py --limit 3 --no-upload    first smoke check without GitHub upload
+python3 test.py --repeats 3             repeat inference timing
+python3 test.py --upload-only results/<run>  retry an existing upload
+
+Optional: --data-dir PATH, --no-download, --threads N, --repo owner/repository.
+--use-current-python skips private-venv creation only if all pinned packages match.
+
+The workspace is the script's folder, or the parent folder when the script is
+inside code/. Each SSH account/workspace has independent data/results/environment.
+Git/Git LFS are device-level tools; GitHub write authentication remains per account.
+Without a power meter electrical power is recorded as null.
+"""
+
+
+def launch(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--help" in arguments or "-h" in arguments:
+        print(HELP)
+        return 0
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--use-current-python", action="store_true")
+    parser.add_argument("--setup-only", action="store_true")
+    options, forwarded = parser.parse_known_args(arguments)
+    if sys.maxsize <= 2**32 or not (3, 11) <= sys.version_info[:2] <= (3, 13):
+        raise RuntimeError("Use 64-bit Python 3.11, 3.12 or 3.13")
+    root = workspace_root()
+    for name in ("code", "models", "data", "results"):
+        _private_directory(root / name)
+    with setup_lock(root):
+        runtime = materialize_bundle(root)
+        python = ensure_environment(root, runtime, options.use_current_python)
+    if options.setup_only and "--prepare-only" not in forwarded: forwarded.append("--prepare-only")
+    environment = _child_environment()
+    environment.update({
+        "RTDETR_WORKSPACE_ROOT": str(root), "RTDETR_PROTOCOL_PATH": str(runtime / "protocol.json"),
+        "RTDETR_MODEL_NAME": MODEL_NAME, "RTDETR_REPO": GITHUB_REPOSITORY,
+        "RTDETR_UPLOAD": "1" if UPLOAD_TO_GITHUB else "0", "RTDETR_THREADS": str(CPU_THREADS),
+        "RTDETR_REPEATS": str(LATENCY_REPEATS), "RTDETR_BUNDLE_SHA256": BUNDLE_SHA256,
+        "RTDETR_LAUNCHER_SHA256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    })
+    print("Workspace:", root, flush=True)
+    return subprocess.call([str(python), "-u", str(runtime / "code/benchmark.py"), *forwarded], env=environment)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(launch())
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        print("Setup/evaluation could not complete:", str(error), file=sys.stderr)
+        raise SystemExit(1)

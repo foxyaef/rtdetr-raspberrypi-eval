@@ -1,4 +1,7 @@
 .venv/
+.rtdetr_venv/
+.rtdetr_runtime/
+.rtdetr_setup.lock
 __pycache__/
 *.pyc
 .pytest_cache/

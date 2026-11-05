@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE = ROOT/'code'
-spec = importlib.util.spec_from_file_location('pi_benchmark_under_test', CODE/'test.py')
+spec = importlib.util.spec_from_file_location('pi_benchmark_under_test', CODE/'benchmark.py')
 benchmark = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(benchmark)
 
