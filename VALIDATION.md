@@ -53,3 +53,11 @@
 - 대기열 예외는 `queue/service_failure.log`와 state의 `service.failure`에 errno와 traceback을 남깁니다. 터미널 EIO를 주입해 다음 모델까지 완료되고 로그가 남는지, 실제 파일 쓰기 EIO는 전파되는지, SIGTERM 이름과 signal handler 복원, 실패 traceback 저장을 검사했습니다.
 - 사용자 접두사를 필수로 요구하지 않습니다. 일반 이름은 shared 브랜치, 선택적 userN_ 접두사는 해당 브랜치로 매핑합니다. 한글·공백·대문자 확장자를 허용하고 실제 모델명은 provenance에 남깁니다. 결과 실행 폴더는 기존 업로더와 호환되도록 안전한 ASCII 이름으로 정리합니다.
 - 최종 전체 **70개 중 68개 통과, Windows symlink 권한 제한 2개 건너뜀**입니다. 작은 실제 ONNX를 일반 대문자 파일명과 한글·공백 파일명으로 저장해 공통 COCO 추론·채점을 확인했습니다. 임시 로컬 Git/LFS 저장소에서 한글·공백·대문자 모델의 shared 브랜치 업로드와 실제 LFS 포인터도 확인했습니다. 이번 수정본의 Raspberry Pi 재실행은 아직 하지 않았습니다.
+
+## 2026-11-06 기본 평가 500장·tmux 안내
+
+- 기본 평가 장수를 500장으로 변경했습니다. 기존 1,000장 후보와 calibration 512장, annotation/manifest 지문은 유지해 이미 받은 데이터를 그대로 재사용합니다. 실제 평가는 후보를 파일명순으로 정렬한 첫 500장입니다. calibration과의 분리도 유지됩니다.
+- 배포용 test.py 하나를 별도 작업 폴더에 복사하고, 작은 실제 ONNX 두 모델을 별도 --limit 없이 각각 500장 CPU 추론·pycocotools 채점·ZIP 저장까지 실행했습니다. 두 모델의 evaluated_image_ids 500개가 같은 것을 확인했습니다. 이 모델은 제어 흐름 검사용이며 연구 성능 수치가 아닙니다.
+- 결과의 image_count=500, protocol_image_count=500, evaluation_scope=protocol_default, full_evaluation=true를 확인했습니다. full_evaluation은 현재 500장 연구 프로토콜 완료 여부입니다. 3장 확인은 subset, 1,000장 선택은 extended로 구분하도록 구현했습니다.
+- 전체 **70개 중 68개 통과, Windows symlink 권한 제한 2개 건너뜀**입니다. Raspberry Pi 실기기에서 이번 500장 실행을 대신 수행한 것은 아닙니다.
+- README에 Pi SSH 터미널에서의 tmux 설치, 세션 생성, 평가 실행, Ctrl+B 다음 소문자 d로 분리, attach 재연결, 기존 세션 확인을 정리했습니다. 공식 tmux 안내를 참고했으며 Pi의 실제 설치는 사용자가 수행해야 합니다.

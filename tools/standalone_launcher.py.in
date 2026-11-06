@@ -283,6 +283,7 @@ python3 test.py --setup-only            prepare environment and images only
 python3 test.py --model user2_v1.onnx    select another model in models/
 python3 test.py --limit 3 --no-upload    first smoke check without GitHub upload
 python3 test.py --repeats 3             repeat inference timing
+python3 test.py --limit 500             evaluate the default common 500 images
 python3 test.py --upload-only results/<run>  retry an existing upload
 python3 test.py --queue                 evaluate queue/inbox/ sequentially
 python3 test.py --queue --no-upload     queue with local ZIP output only
@@ -300,6 +301,7 @@ inside code/. All queued models in one workspace share data and environment.
 Git/Git LFS are device-level tools; GitHub write authentication remains per account.
 Without a power meter electrical power is recorded as null.
 Live readable status: queue/status.txt (updates even during inference).
+Default evaluation: 500 fixed images; existing data/downloads are reused.
 """
 
 

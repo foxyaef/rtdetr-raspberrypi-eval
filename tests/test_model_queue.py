@@ -100,6 +100,7 @@ class QueueTests(unittest.TestCase):
         with mock.patch.object(engine,'ROOT',self.root), mock.patch.object(queue,'run_queue',return_value=0) as run:
             self.assertEqual(engine.main(['--no-upload','--no-download']),0)
             self.assertTrue(run.call_args.kwargs['watch'])
+            self.assertEqual(run.call_args.args[1]['limit'],500)
             self.assertEqual(engine.main(['--once','--no-upload','--no-download']),0)
             self.assertFalse(run.call_args.kwargs['watch'])
         with self.assertRaises(SystemExit),mock.patch.object(engine,'ROOT',self.root):
@@ -264,7 +265,7 @@ class QueueTests(unittest.TestCase):
         for name in ['baseline.ONNX','최적화 모델.onnx']:onnx.save(model,self.inbox/name)
         self.add('user2_broken.onnx',b'not an ONNX model')
         command=[sys.executable,str(script),'--use-current-python','--once','--no-download','--no-upload',
-                 '--data-dir',os.environ['COCO_DATA_DIR'],'--limit','2','--threads','1']
+                 '--data-dir',os.environ['COCO_DATA_DIR'],'--threads','1']
         result=subprocess.run(command,cwd=self.root,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=240)
         self.assertEqual(result.returncode,1,result.stdout+'\n'+result.stderr)
         jobs=self.state()['jobs']
@@ -276,12 +277,19 @@ class QueueTests(unittest.TestCase):
                 self.assertIn('evaluation_state.json',bundle.namelist())
         for job in [jobs[0],jobs[2]]:
             metrics=json.loads((Path(job['result_dir'])/'metrics.json').read_text())
-            self.assertEqual(metrics['image_count'],2)
-            self.assertFalse(metrics['full_evaluation'])
+            self.assertEqual(metrics['image_count'],500)
+            self.assertEqual(metrics['protocol_image_count'],500)
+            self.assertTrue(metrics['full_evaluation'])
+            self.assertEqual(metrics['evaluation_scope'],'protocol_default')
+            provenance=json.loads((Path(job['result_dir'])/'inference_provenance.json').read_text())
+            self.assertEqual(len(provenance['evaluated_image_ids']),500)
             self.assertGreater(metrics['resource']['rss_peak_bytes'],0)
         again=subprocess.run(command,cwd=self.root,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=60)
         self.assertEqual([j['attempts'] for j in self.state()['jobs']],[1,1,1])
         self.assertNotIn('Stage: infer',again.stdout)
+        first=json.loads((Path(jobs[0]['result_dir'])/'inference_provenance.json').read_text())
+        last=json.loads((Path(jobs[2]['result_dir'])/'inference_provenance.json').read_text())
+        self.assertEqual(first['evaluated_image_ids'],last['evaluated_image_ids'])
 
 
 if __name__=='__main__':unittest.main()

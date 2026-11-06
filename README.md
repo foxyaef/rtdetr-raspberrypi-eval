@@ -66,14 +66,18 @@ python3 test.py --no-upload
 
 **동작 순서:** 대기열 등록 → 공통 이미지 한 번 검증/준비 → 모델 검사 → CPU 추론 → COCO mAP 계산 → 결과 ZIP 저장 → 선택적 업로드 → 다음 모델. 추론과 정확도 계산은 별도 프로세스여서 이전 모델의 추론 메모리를 해제한 뒤 다음 모델을 실행합니다. 같은 작업 폴더에서는 평가 잠금으로 대기열/단일 평가의 중복 실행을 막습니다.
 
-처음에는 3장으로 동작을 확인하고, 정상 동작하면 1,000장을 평가하세요.
+처음에는 3장으로 동작을 확인하고, 정상 동작하면 기본 **500장**을 평가하세요.
 
 ```bash
 python3 test.py --once --limit 3 --no-upload
 python3 test.py --queue
 ```
 
-3장 실행과 1,000장 실행은 별도 작업입니다. 모델 파일 SHA256·모델명·이미지 수·반복/스레드 수·데이터/결과 경로·프로토콜·평가 코드 지문을 조합해 작업을 식별합니다. **동일한 모델과 설정으로 완료한 작업은 재실행해도 건너뜁니다.** 코드나 설정이 바뀌면 다시 평가합니다. 모델을 복사하거나 자동 삭제하지 않으며, 처리한 모델은 `inbox/`에 그대로 남습니다.
+3장 실행과 500장 실행은 별도 작업입니다. 모델 파일 SHA256·모델명·이미지 수·반복/스레드 수·데이터/결과 경로·프로토콜·평가 코드 지문을 조합해 작업을 식별합니다. **동일한 모델과 설정으로 완료한 작업은 재실행해도 건너뜁니다.** 코드나 설정이 바뀌면 다시 평가합니다. 모델을 복사하거나 자동 삭제하지 않으며, 처리한 모델은 `inbox/`에 그대로 남습니다.
+
+기존 1,000장 평가 후보에서 파일명순으로 앞의 500장을 모든 모델에 동일하게 사용합니다. 이미 받은 이미지·annotation·다운로드 ZIP을 재사용하므로 다시 다운로드할 필요가 없습니다. 데이터 준비 폴더에는 기존 후보 1,000장과 calibration 512장이 남지만, 실제 추론·채점은 선택된 500장만 진행합니다. `--limit 1000`을 명시하면 기존 1,000장 평가도 가능합니다.
+
+`metrics.json`·`provenance.json`·`evaluation_state.json`에 `image_count=500`, `protocol_image_count=500`, `evaluation_scope=protocol_default`를 기록합니다. `full_evaluation=true`는 **현재 연구 프로토콜의 기본 500장을 모두 평가했다는 뜻**이며 COCO 전체 validation을 뜻하지 않습니다. `--limit 3`은 `subset`, `--limit 1000`은 `extended`로 구분합니다. 실제 평가 이미지 ID도 저장하므로 과거 1,000장 결과와 500장 결과를 구분해 비교하세요.
 
 **사용자 이름으로 파일명을 제한하지 않습니다.** `baseline.onnx`, `encoder_int8.onnx`, `최적화 모델.ONNX`처럼 일반 파일명도 사용할 수 있습니다. 공백·한글·대문자 확장자를 허용합니다. 숨김 파일·경로 문자·제어문자 등은 제외하고 이름은 UTF-8 200바이트까지입니다. `.onix`도 받지만 표준 확장자는 **`.onnx`**입니다. 모델 내용은 RT-DETR deploy 입력 `images`, `orig_target_sizes`와 출력 `labels`, `boxes`, `scores`를 가진 **self-contained ONNX**여야 합니다. 외부 가중치 파일을 요구하는 모델은 지원하지 않습니다.
 
@@ -93,14 +97,40 @@ python3 test.py --no-upload
 python3 test.py --once --no-upload
 ```
 
-SSH 접속을 닫아도 계속 실행하려면 `tmux`에서 실행합니다. 아래 예시는 `code/` 안에 파일을 저장한 구조 기준입니다.
+SSH 접속을 닫아도 계속 실행하려면 `tmux`에서 실행합니다. 별도 `.tmux.conf` 설정 없이 설치 후 바로 사용할 수 있습니다. 아래 명령은 PC가 아닌 **라즈베리파이에 접속한 SSH 터미널**에서 실행합니다.
 
 ```bash
+sudo apt update
+sudo apt install -y tmux
+tmux -V
+```
+
+기존 평가기가 실행 중이라면 먼저 Ctrl+C로 종료하고 최신 `test.py`로 교체합니다. ZIP에 기록된 작업 경로는 `/home/user1`입니다. 다음 예시는 `/home/user1/code/test.py`에 저장한 구조 기준입니다.
+
+```bash
+cd /home/user1
 tmux new -s rtdetr
+```
+
+새 tmux 화면이 열리면 평가기를 실행합니다. 이제 기본값은 500장입니다.
+
+```bash
 python3 code/test.py --no-upload
 ```
 
-`Ctrl+B`를 누른 뒤 `D`를 누르면 평가기를 유지한 채 세션에서 나옵니다. 다시 확인하려면 `tmux attach -t rtdetr`를 사용합니다.
+`test.py`를 `/home/user1/test.py`에 단독 저장했다면 대신 `python3 test.py --no-upload`를 사용합니다. GitHub 자동 업로드가 필요하면 `--no-upload`를 빼고 상단 `UPLOAD_TO_GITHUB=True`인지 확인하세요.
+
+**Ctrl+B를 누르고 손을 뗀 뒤 소문자 d**를 누르면 평가기를 유지한 채 tmux에서 나옵니다. 이 상태에서 SSH 창을 닫아도 됩니다. Ctrl+C는 평가를 중단하므로 세션에서 나오려는 용도로 사용하지 마세요.
+
+다시 SSH에 접속한 뒤 같은 서버 계정에서 재연결합니다.
+
+```bash
+tmux attach -t rtdetr
+```
+
+이미 `rtdetr` 세션이 있다는 메시지가 나오면 새로 만들지 말고 위 attach 명령을 사용합니다. 세션 목록은 `tmux ls`로 확인합니다. tmux에 돌아와 실제 평가를 종료하려면 Ctrl+C를 누릅니다. 기기 재부팅·전원 차단 뒤 자동 재시작하는 기능은 별도로 구성해야 합니다.
+
+참고: [tmux 공식 시작 안내](https://github.com/tmux/tmux/wiki/Getting-Started).
 
 ## 메모장으로 볼 수 있는 현재 상태
 
@@ -115,7 +145,7 @@ RT-DETR 모델 평가 서버 상태
 대기 중인 모델: 2건
   1. user2_v1.onnx
   2. user3_v2.onnx
-추론 진행: 250/1000장
+추론 진행: 250/500장
 전송 중(.part): 1건
 누적 완료: 3건
 누적 실패(자동 반복 안 함): 0건
@@ -197,7 +227,7 @@ user2_v1.onnx → user2 브랜치
 
 ## 공통 데이터와 측정 조건
 
-- 공통 Colab과 같은 seed 42의 COCO 선택: calibration 512장, 겹치지 않는 evaluation 1,000장. 평가기는 calibration으로 모델을 재양자화하지 않습니다.
+- 공통 Colab과 같은 seed 42의 COCO 후보 선택: calibration 512장, 겹치지 않는 evaluation 후보 1,000장 중 파일명순 500장으로 기본 평가합니다. 평가기는 calibration으로 모델을 재양자화하지 않습니다.
 - 공식 ZIP 약 1.1GB를 내려받고 선택 JPEG **1,512장만** 풉니다. 공식 ZIP SHA256·JPEG CRC·annotation/manifest 지문을 검사합니다. 데이터와 환경은 작업 폴더당 한 벌을 모든 모델이 재사용합니다.
 - CPUExecutionProvider, ONNX Runtime 1.22.1, batch 1, 640×640 RGB bilinear/255, 기본 CPU 스레드 4개, 별도 warmup 최대 10장 뒤 모든 평가 이미지 측정.
 - 추론 반복은 `--repeats 3`처럼 지정합니다. AP 예측·전처리·출력 변환·E2E는 이미지당 첫 반복을 쓰고, 추론 시간은 모든 반복을 기록합니다. 반복해도 정확도 표본 수가 늘지는 않습니다.

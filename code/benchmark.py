@@ -56,6 +56,16 @@ def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
+def evaluation_metadata(image_count):
+    protocol=read_json(PROTOCOL_PATH)
+    target=protocol["evaluation_images"]
+    return {"image_count":image_count,"protocol_image_count":target,
+            "source_pool_image_count":protocol["evaluation_pool_images"],
+            "evaluation_selection":protocol["evaluation_selection"],
+            "evaluation_scope":"protocol_default" if image_count==target else "subset" if image_count<target else "extended",
+            "full_evaluation":image_count==target}
+
+
 def distribution(values):
     if not values: return {"mean": None, "p50": None, "p95": None}
     ordered = sorted(values)
@@ -379,7 +389,8 @@ def main(argv=None):
     parser.add_argument("--queue-status",action="store_true")
     parser.add_argument("--data-dir",type=Path,default=ROOT/"data/coco")
     parser.add_argument("--results-dir",type=Path,default=ROOT/"results")
-    parser.add_argument("--limit",type=int,default=1000,help="3 for smoke; 1000 for full evaluation")
+    parser.add_argument("--limit",type=int,default=read_json(PROTOCOL_PATH)["evaluation_images"],
+                        help="Default 500 common images; 3 for smoke; maximum 1000")
     parser.add_argument("--repeats",type=int,default=LATENCY_REPEATS)
     parser.add_argument("--threads",type=int,default=CPU_THREADS)
     parser.add_argument("--repo",default=GITHUB_REPOSITORY)
@@ -462,7 +473,8 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
     model=model.resolve(); source_hash=sha256(model)
     if expected_sha is not None and source_hash!=expected_sha:
         raise ValueError("Queued model changed after registration; submit it under a new version name")
-    if args.limit!=1000:print(f"SMOKE/PARTIAL: {args.limit} images. Accuracy is not the final 1000-image result.",flush=True)
+    evaluation=evaluation_metadata(args.limit)
+    print(f"Evaluation: {args.limit} images (protocol default {evaluation['protocol_image_count']}; {evaluation['evaluation_scope']}).",flush=True)
     stamp=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     run_label=re.sub(r"[^A-Za-z0-9_.-]+","_",model.stem).strip("._-")[:120] or "model"
     output=args.results_dir.resolve()/(run_label+"_"+stamp+"_"+uuid.uuid4().hex[:8]); output.mkdir(parents=True)
@@ -475,7 +487,7 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
                "model_relative_path":model.relative_to(ROOT).as_posix(),
                "test_script_sha256":sha256(__file__),"launcher_sha256":os.environ.get("RTDETR_LAUNCHER_SHA256"),
                "runtime_bundle_sha256":os.environ.get("RTDETR_BUNDLE_SHA256"),
-               "created_at_utc":stamp,"full_evaluation":args.limit==1000})
+               "created_at_utc":stamp,**evaluation})
     stage="data_preparation"
     try:
         if prepared is None: prepared=prepare_data(args.data_dir.resolve(),download=not args.no_download)
@@ -496,12 +508,12 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
         if sha256(model)!=source_hash:raise RuntimeError("Model file changed while evaluation was running")
         resource=read_json(output/"inference_metrics.json"); accuracy=read_json(output/"accuracy.json")
         metrics={**accuracy,"resource":resource,"model_file_bytes":model.stat().st_size,
-                 "model_file_MiB":model.stat().st_size/1048576,"image_count":args.limit,"full_evaluation":args.limit==1000}
+                 "model_file_MiB":model.stat().st_size/1048576,**evaluation}
         write_json(output/"metrics.json",metrics)
         provenance.update(read_json(output/"inference_provenance.json")); write_json(output/"provenance.json",provenance)
         write_json(output/"system_info_after.json",system_info())
         write_json(output/"errors.json",[])
-        write_json(output/"evaluation_state.json",{"status":"complete","stage":"complete","full_evaluation":args.limit==1000})
+        write_json(output/"evaluation_state.json",{"status":"complete","stage":"complete",**evaluation})
         print(json.dumps({"mAP50_95":accuracy["mAP50_95"],"file_MiB":metrics["model_file_MiB"],
                           "E2E_p50_ms":resource["latency"]["end_to_end_ms"]["p50"],
                           "CPU_peak_percent_machine":resource["cpu_process_peak_percent_machine_normalized"],
