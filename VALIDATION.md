@@ -61,3 +61,9 @@
 - 결과의 image_count=500, protocol_image_count=500, evaluation_scope=protocol_default, full_evaluation=true를 확인했습니다. full_evaluation은 현재 500장 연구 프로토콜 완료 여부입니다. 3장 확인은 subset, 1,000장 선택은 extended로 구분하도록 구현했습니다.
 - 전체 **70개 중 68개 통과, Windows symlink 권한 제한 2개 건너뜀**입니다. Raspberry Pi 실기기에서 이번 500장 실행을 대신 수행한 것은 아닙니다.
 - README에 Pi SSH 터미널에서의 tmux 설치, 세션 생성, 평가 실행, Ctrl+B 다음 소문자 d로 분리, attach 재연결, 기존 세션 확인을 정리했습니다. 공식 tmux 안내를 참고했으며 Pi의 실제 설치는 사용자가 수행해야 합니다.
+
+## 2026-11-06 기존 ZIP 단독 업로드 파일
+
+- code/upload_results.py는 독립 실행 파일이며 Python 표준 라이브러리와 gh만 사용합니다. 기존 평가 엔진·배포용 test.py를 변경하지 않았습니다. 원본 ZIP을 추론/모델 업로드/clone/압축 해제 없이 results/<branch>/zip_uploads/<원본이름>.zip에 저장합니다.
+- 추가 검사 **10개 모두 통과**했습니다. in-memory GitHub API로 실제 ZIP 바이트의 Git blob SHA/base64 요청 일치, 소스 트리 보존, 기본 브랜치 유지, 새 브랜치 생성, 같은 ZIP 재시도, 충돌 시 덮어쓰기 거부, 동시 갱신 후 peer 파일 보존, 쓰기 권한/임시 공간 부족, 민감 경로 거부, CLI 응답 파싱/토큰 비노출을 검사했습니다.
+- Python 파일 하나만 별도 폴더에 복사한 --help 실행과 기본 파일 선택/업로드 영수증 저장도 검사했습니다. GitHub API 검사는 모의 환경이며 실제 공개 저장소에 시험 ZIP을 올리지 않았습니다. 실제 Pi에서의 gh 인증과 요청한 새 ZIP 업로드는 사용자가 실행해야 확인됩니다.
