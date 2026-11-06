@@ -210,6 +210,10 @@ class LocalGitLFSIntegration(unittest.TestCase):
         self.assertTrue((self.run / "metrics.json").is_file())
 
     def test_zip_upload_and_retry_match_local_archive(self):
+        (self.root/'models').mkdir()
+        self.model=self.model.rename(self.root/'models'/self.model.name)
+        (self.run/'evaluation_state.json').write_text('{"status":"complete"}',encoding='utf-8')
+        original_metrics=(self.run/'metrics.json').read_bytes()
         archive=Path(str(self.run)+'.zip')
         with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED) as bundle:
             for path in sorted(self.run.rglob('*')):
@@ -226,6 +230,11 @@ class LocalGitLFSIntegration(unittest.TestCase):
         (self.run/'metrics.json').write_text('{"changed":true}',encoding='utf-8')
         with self.assertRaisesRegex(uploader.UploadError,'ZIP contents differ'):
             uploader.upload_run(self.model,self.run,'owner/repo',archive_path=archive)
+        (self.run/'metrics.json').write_bytes(original_metrics)
+        cleanup=uploader.cleanup_uploaded_run(self.root,self.root,self.model,self.run,archive,receipt)
+        self.assertEqual(cleanup['cleanup_status'],'complete')
+        self.assertFalse(self.model.exists() or self.run.exists() or archive.exists())
+        self.assertTrue(remote_archive.is_file())
 
     def test_free_unicode_filename_and_uppercase_extension_upload_to_shared(self):
         self.model=self.model.rename(self.root/'인코더 모델.ONNX')

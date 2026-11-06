@@ -105,11 +105,32 @@ def save_state(directory, state):
 
 def load_state(directory):
     path = Path(directory) / "state.json"
-    if not path.exists(): return {"format": 1, "jobs": []}
     if _is_link(path): raise RuntimeError("Queue state must not be a symlink")
-    state = json.loads(path.read_text(encoding="utf-8"))
+    state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"format":1,"jobs":[]}
     if state.get("format") != 1 or not isinstance(state.get("jobs"), list):
         raise RuntimeError("Unrecognized queue state; existing state was preserved")
+    # Recover uploads durably recorded before cleanup, even after a power loss.
+    for job in state['jobs']:
+        result=job.get('result_dir')
+        if not result:continue
+        record_path=Path(directory)/'uploaded'/(Path(result).name+'.json')
+        if record_path.is_file() and not _is_link(record_path):
+            record=json.loads(record_path.read_text(encoding='utf-8'))
+            if (record.get('result_dir')==result and record.get('model_name')==job.get('model_name')
+                    and record.get('upload_receipt',{}).get('model_sha256')==job.get('model_sha256')):
+                job.update(status='completed',upload_status='uploaded',cleanup_status=record['cleanup_status'],
+                           upload_receipt=record['upload_receipt'])
+    history=Path(directory)/'uploaded'
+    if history.exists() and not _is_link(history):
+        for record_path in history.glob('*.json'):
+            if _is_link(record_path):continue
+            record=json.loads(record_path.read_text(encoding='utf-8'))
+            receipt=record.get('upload_receipt',{})
+            if receipt.get('status')!='uploaded' or any(j.get('result_dir')==record.get('result_dir') for j in state['jobs']):continue
+            state['jobs'].append({'id':'uploaded:'+record_path.stem,'model_name':record['model_name'],
+                'model_sha256':receipt['model_sha256'],'result_dir':record['result_dir'],
+                'archive_path':record['archive_path'],'status':'completed','upload_status':'uploaded',
+                'cleanup_status':record['cleanup_status'],'upload_receipt':receipt,'attempts':1})
     return state
 
 
@@ -158,7 +179,7 @@ def file_signature(info):
 
 def scan_models(inbox, names=None, cache=None):
     inbox = Path(inbox)
-    selected = list(names) if names else sorted(
+    selected = list(names) if names is not None else sorted(
         p.name for p in inbox.iterdir() if p.suffix.lower() in (".onnx", ".onix"))
     snapshots, rejected = [], []
     for name in dict.fromkeys(selected):
@@ -211,6 +232,7 @@ class QueueStatus:
         self.phase = "starting"
         self.image_current = self.image_total = None
         self.completed = self.failed = 0
+        self.completed_models = []
         self.reason = ""
         self.error = None
 
@@ -222,6 +244,7 @@ class QueueStatus:
                 "status": by_id[job_key(item, settings)]["status"]} for item in snapshots}
             self.completed = sum(job["status"] == "completed" for job in jobs)
             self.failed = sum(job["status"] == "failed" for job in jobs)
+            self.completed_models = list(dict.fromkeys(job['model_name'] for job in jobs if job['status']=='completed'))
 
     def activity(self, phase, model=None, *, refresh=True, image_current=None, image_total=None):
         with self.lock:
@@ -279,6 +302,7 @@ class QueueStatus:
                 lines.append(f"추론 진행: {self.image_current}/{self.image_total}장")
             lines += [f"전송 중(.part): {transferring}건", f"누적 완료: {self.completed}건",
                       f"누적 실패(자동 반복 안 함): {self.failed}건", f"파일명/형식 확인 필요: {len(invalid)}건"]
+            lines += ['완료된 모델:']+[f'  {name}' for name in self.completed_models]
             lines += [f"  확인 필요: {name}" for name in invalid]
             lines += [f"감시 모드: {'계속 대기' if self.watch else '현재 목록만 처리'}",
                       f"새 모델 탐색 간격: {self.poll_seconds}초", f"상태 갱신 간격: 최대 {self.interval}초",
@@ -359,6 +383,8 @@ def run_queue(root, settings, prepare, evaluate, *, names=None, retry_failed=Fal
                            "created_at_utc": now(), "attempts": 0}
                     state["jobs"].append(job)
                 if job["status"] == "completed":
+                    if job.get('upload_status')=='uploaded' and job.get('cleanup_status') in ('complete','partial','pending'):
+                        continue  # Intentional cleanup is not a missing-artifact failure.
                     # A successful evaluation with failed upload is still completed.
                     # Upload-only retries do not run the model a second time.
                     if Path(job.get("archive_path", "")).is_file() and Path(job.get("result_dir", "")).is_dir():
@@ -409,6 +435,9 @@ def run_queue(root, settings, prepare, evaluate, *, names=None, retry_failed=Fal
                     save_state(directory, state)
                     monitor.sync_jobs(snapshots, state["jobs"], settings)
             monitor.activity("ready")
+            if selected_names is not None:
+                removed={item['model_name'] for item in state['jobs'] if item.get('cleanup_status')=='complete'}
+                selected_names=[name for name in selected_names if name not in removed or (inbox/name).exists()]
             if current: continue
             if not watch: break
             print(f"Queue waiting: {inbox} (poll {poll_seconds}s; Ctrl+C to stop)", flush=True)

@@ -377,6 +377,17 @@ def upload(model,output,repo,archive=None):
         return False
 
 
+def cleanup_after_upload(model,output,archive,results_root):
+    from github_upload import cleanup_uploaded_run
+    try:
+        record=cleanup_uploaded_run(ROOT,results_root,model,output,archive,read_json(output/'upload_status.json'))
+        print('Post-upload cleanup:',record['cleanup_status'],model.name,flush=True)
+        return {key:record[key] for key in ('cleanup_status','upload_receipt','cleanup_error') if key in record}
+    except Exception as error:
+        print('Upload succeeded; cleanup refused:',str(error),flush=True)
+        return {'cleanup_status':'refused','cleanup_error':str(error)}
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model",help="Single filename within models/; bypasses queue auto-detection")
@@ -449,7 +460,9 @@ def main(argv=None):
             raise ValueError("Saved model path/hash does not match this result")
         with evaluation_lock(ROOT), interrupt_signals():
             archive=package_results(output)
-            okay=upload(model,output,args.repo,archive); return 0 if okay else 2
+            okay=upload(model,output,args.repo,archive)
+            if okay:cleanup_after_upload(model,output,archive,output.parent)
+            return 0 if okay else 2
     with evaluation_lock(ROOT), interrupt_signals():
         return evaluate_model(args,name=args.model or MODEL_NAME)["returncode"]
 
@@ -532,8 +545,10 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
     if progress and should_upload: progress({"stage":"upload"})
     okay=upload(model,output,args.repo,archive) if should_upload else True
     if not should_upload:write_json(output/"upload_status.json",{"status":"disabled"})
+    upload_status=read_json(output/"upload_status.json")["status"]
+    cleanup=cleanup_after_upload(model,output,archive,args.results_dir) if should_upload and okay else {'cleanup_status':'not_requested'}
     return {"returncode":0 if okay else 2,"result_dir":str(output),"archive_path":archive,
-            "upload_status":read_json(output/"upload_status.json")["status"]}
+            "upload_status":upload_status,**cleanup}
 
 
 if __name__=="__main__":

@@ -299,7 +299,8 @@ def upload_run(model_path: Path | str, result_dir: Path | str,
             if destination_run.exists():
                 if _same_existing_run(checkout, destination_run, result_hashes, model_relative, model_sha):
                     commit = _run(["rev-parse", "HEAD"], checkout).stdout.strip()
-                    return _receipt(repo, user, commit, model, model_sha, results.name, already_present=True)
+                    return {**_receipt(repo, user, commit, model, model_sha, results.name, already_present=True),
+                            "uploaded_files_sha256":result_hashes}
                 raise UploadError("This run directory already exists with different contents; use a new run ID.")
             destination_model.parent.mkdir(parents=True, exist_ok=True)
             destination_run.mkdir(parents=True)
@@ -339,7 +340,67 @@ def upload_run(model_path: Path | str, result_dir: Path | str,
         raise
     except OSError as exc:
         raise UploadError("Upload preparation failed; local results are retained: " + _sanitize(str(exc))) from exc
-    return _receipt(repo, user, commit, model, model_sha, results.name)
+    return {**_receipt(repo, user, commit, model, model_sha, results.name),
+            "uploaded_files_sha256":result_hashes}
+
+
+def cleanup_uploaded_run(root, results_root, model, results, archive, receipt):
+    """Delete only this verified, uploaded run; durable receipt survives deletion."""
+    root=Path(root).resolve(); results_root=Path(results_root).resolve()
+    model=Path(model).absolute(); results=Path(results).absolute(); archive=Path(archive).absolute()
+    for path in (model,results,archive):
+        if _is_link(path):raise UploadError('Cleanup refuses symlinks/junctions')
+        for parent in path.parents:
+            if _is_link(parent):raise UploadError('Cleanup refuses linked parent directories')
+    model=model.resolve();results=results.resolve();archive=archive.resolve()
+    if (model.parent not in (root/'models',root/'queue/inbox') or results.parent!=results_root
+            or results==root or results==results_root or archive!=Path(str(results)+'.zip')):
+        raise UploadError('Cleanup paths do not match the selected workspace/run')
+    if (receipt.get('status')!='uploaded' or not re.fullmatch(r'[0-9a-f]{40}',str(receipt.get('commit_sha','')))
+            or receipt.get('run_id')!=results.name or receipt.get('branch')!=infer_user(model)):
+        raise UploadError('A successful upload receipt for this exact run is required')
+    provenance=json.loads((results/'provenance.json').read_text(encoding='utf-8-sig'))
+    state=json.loads((results/'evaluation_state.json').read_text(encoding='utf-8-sig'))
+    if (state.get('status')!='complete' or provenance.get('model_name')!=model.name
+            or provenance.get('model_sha256')!=receipt.get('model_sha256')
+            or _sha256(model)!=receipt['model_sha256']):
+        raise UploadError('Model changed or evaluation is incomplete; cleanup refused')
+    actual={}
+    for path in results.rglob('*'):
+        if _is_link(path):raise UploadError('Cleanup refuses links within the result tree')
+        if path.is_file() and path!=results/'upload_status.json':
+            actual[path.relative_to(results).as_posix()]=_sha256(path)
+    actual['results.zip']=_sha256(archive)
+    if actual!=receipt.get('uploaded_files_sha256'):
+        raise UploadError('Local results/ZIP differ from uploaded files; cleanup refused')
+    directory=root/'queue'/'uploaded'
+    for path in (root/'queue',directory):
+        if _is_link(path):raise UploadError('Cleanup history cannot be a symlink/junction')
+        path.mkdir(exist_ok=True)
+    journal=directory/(results.name+'.json')
+    if _is_link(journal):raise UploadError('Cleanup receipt cannot be a symlink')
+    record={'model_name':model.name,'result_dir':str(results),'archive_path':str(archive),
+            'model_path':str(model),'upload_receipt':receipt,'cleanup_status':'pending'}
+    def save():
+        temporary=journal.with_suffix('.json.tmp')
+        if _is_link(temporary):raise UploadError('Cleanup temporary receipt cannot be a symlink')
+        with temporary.open('w',encoding='utf-8') as stream:
+            json.dump(record,stream,ensure_ascii=False,indent=2);stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary,journal)
+    save()  # Commit/hash evidence is durable before the first deletion.
+    try:
+        # All resolved paths and every uploaded file were checked above. Never
+        # delete the results root, shared data, another run, or other models.
+        archive.unlink()
+        shutil.rmtree(results)
+        if _sha256(model)!=receipt['model_sha256']:
+            raise UploadError('Model replaced during cleanup; replacement preserved')
+        model.unlink()
+        record['cleanup_status']='complete'
+    except Exception as error:
+        record.update(cleanup_status='partial',cleanup_error=_sanitize(str(error)))
+        save();return record
+    save();return record
 
 
 def main() -> int:
