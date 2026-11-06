@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -325,6 +326,9 @@ def launch(argv=None):
         runtime = materialize_bundle(root)
         python = ensure_environment(root, runtime, options.use_current_python)
     if options.setup_only and "--prepare-only" not in forwarded: forwarded.append("--prepare-only")
+    persistent = not any(flag in forwarded for flag in ("--once","--model","--worker","--upload-only","--prepare-only"))
+    if persistent and hasattr(signal,"SIGHUP"):
+        signal.signal(signal.SIGHUP,signal.SIG_IGN)
     environment = _child_environment()
     environment.update({
         "RTDETR_WORKSPACE_ROOT": str(root), "RTDETR_PROTOCOL_PATH": str(runtime / "protocol.json"),
@@ -333,7 +337,9 @@ def launch(argv=None):
         "RTDETR_REPEATS": str(LATENCY_REPEATS), "RTDETR_BUNDLE_SHA256": BUNDLE_SHA256,
         "RTDETR_LAUNCHER_SHA256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     })
-    print("Workspace:", root, flush=True)
+    try: print("Workspace:", root, flush=True)
+    except OSError as error:
+        if error.errno not in (5,32,9,6): raise
     return subprocess.call([str(python), "-u", str(runtime / "code/benchmark.py"), *forwarded], env=environment)
 
 

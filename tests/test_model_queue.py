@@ -1,5 +1,7 @@
 """Sequential scheduling, durable resume, and copied-file ONNX queue integration."""
 import importlib.util
+import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -71,7 +73,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(len(self.state()['jobs']),2)
 
     def test_explicit_order_invalid_name_rejection_and_deduplication(self):
-        self.add('user1_v1.onnx');self.add('user2_v1.onix');self.add('user8_v1.onnx')
+        self.add('user1_v1.onnx');self.add('user2_v1.onix');self.add('.hidden.onnx')
         self.run_queue(names=['user2_v1.onix','user1_v1.onnx','user2_v1.onix','../escape.onnx'])
         self.assertEqual(self.calls,['user2_v1.onix','user1_v1.onnx'])
         self.assertEqual(len(self.state()['rejected']),1)
@@ -131,7 +133,7 @@ class QueueTests(unittest.TestCase):
         self.assertIn('종료됨',(self.root/'queue/status.txt').read_text(encoding='utf-8'))
 
     def test_idle_status_says_ready_but_stopped_status_does_not(self):
-        self.add('user1_v1.onnx.part');self.add('user8_invalid.onnx')
+        self.add('user1_v1.onnx.part');self.add('.hidden.onnx')
         status=queue.QueueStatus(self.root,watch=True,poll_seconds=15)
         status.activity('ready')
         text=(self.root/'queue/status.txt').read_text(encoding='utf-8')
@@ -184,6 +186,44 @@ class QueueTests(unittest.TestCase):
         pause.assert_called_once_with(.025)
         self.assertIn('RT-DETR',(self.root/'queue/status.txt').read_text(encoding='utf-8'))
 
+    def test_disconnected_console_does_not_abort_queue_or_lose_disk_log(self):
+        self.add('user1_v1.onnx');self.add('user2_v1.onnx')
+        broken=mock.Mock()
+        broken.write.side_effect=OSError(errno.EIO,'terminal disconnected')
+        with mock.patch.object(sys,'stdout',broken):
+            with queue.console_logging(self.root):
+                self.assertEqual(self.run_queue()[0],0)
+        self.assertEqual(self.calls,['user1_v1.onnx','user2_v1.onnx'])
+        log=(self.root/'queue/service.log').read_text(encoding='utf-8')
+        self.assertIn('console disconnected',log)
+        self.assertIn('user2_v1.onnx',log)
+        self.assertEqual(broken.write.call_count,1)
+
+    def test_actual_filesystem_io_error_is_not_suppressed_as_console_error(self):
+        disk=mock.Mock();disk.write.side_effect=OSError(errno.EIO,'disk failure')
+        console=io.StringIO()
+        with self.assertRaises(OSError):queue.ResilientConsole(console,disk).write('test')
+        self.assertEqual(console.getvalue(),'')
+
+    def test_termination_signal_records_name_and_restores_handler(self):
+        number=queue.signal.SIGTERM;old=queue.signal.getsignal(number)
+        with queue.interrupt_signals(keep_running_on_hangup=True):
+            with self.assertRaises(queue.QueueInterrupted) as captured:
+                queue.signal.getsignal(number)(number,None)
+            self.assertEqual(captured.exception.signal_name,'SIGTERM')
+            if hasattr(queue.signal,'SIGHUP'):
+                self.assertEqual(queue.signal.getsignal(queue.signal.SIGHUP),queue.signal.SIG_IGN)
+        self.assertEqual(queue.signal.getsignal(number),old)
+
+    def test_service_io_error_retains_traceback_and_errno(self):
+        self.add('user1_v1.onnx')
+        with self.assertRaises(OSError):
+            queue.run_queue(self.root,{},mock.Mock(side_effect=OSError(errno.EIO,'data disk failure')),self.evaluate)
+        failure=self.state()['service']['failure']
+        self.assertEqual(failure['errno'],errno.EIO)
+        self.assertIn('Traceback',failure['traceback'])
+        self.assertTrue((self.root/'queue/service_failure.log').is_file())
+
     def test_os_lock_blocks_another_process_and_releases(self):
         command=[sys.executable,'-c',
             'import sys;sys.path.insert(0,sys.argv[1]);from model_queue import evaluation_lock;'
@@ -221,7 +261,7 @@ class QueueTests(unittest.TestCase):
         model=helper.make_model(helper.make_graph(nodes,'queue_control_fixture',inputs,outputs),
                                 opset_imports=[helper.make_opsetid('',17)])
         model.ir_version=10
-        for name in ['user1_fixture.onnx','user3_fixture.onix']:onnx.save(model,self.inbox/name)
+        for name in ['baseline.ONNX','최적화 모델.onnx']:onnx.save(model,self.inbox/name)
         self.add('user2_broken.onnx',b'not an ONNX model')
         command=[sys.executable,str(script),'--use-current-python','--once','--no-download','--no-upload',
                  '--data-dir',os.environ['COCO_DATA_DIR'],'--limit','2','--threads','1']

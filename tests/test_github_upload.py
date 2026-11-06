@@ -54,7 +54,10 @@ class ValidationTests(unittest.TestCase):
     def test_identity_and_legacy_extension(self):
         self.assertEqual(uploader.infer_user(self.model), "user1")
         self.assertEqual(uploader.infer_user("user4_decoder_v2.onix"), "user4")
-        for name in ["user5_v1.onnx", "fp32.onnx", "user1_../secret.onnx", "user1_v1.exe", "user1_..v1.onnx"]:
+        self.assertEqual(uploader.infer_user('user5_v1.onnx'),'user5')
+        self.assertEqual(uploader.infer_user('fp32.onnx'),'shared')
+        self.assertEqual(uploader.infer_user('인코더 모델.ONNX'),'shared')
+        for name in ['.hidden.onnx','bad\nname.onnx','bad:name.onnx','user1_v1.exe']:
             with self.subTest(name=name), self.assertRaises(uploader.UploadError):
                 uploader.infer_user(name)
 
@@ -223,6 +226,15 @@ class LocalGitLFSIntegration(unittest.TestCase):
         (self.run/'metrics.json').write_text('{"changed":true}',encoding='utf-8')
         with self.assertRaisesRegex(uploader.UploadError,'ZIP contents differ'):
             uploader.upload_run(self.model,self.run,'owner/repo',archive_path=archive)
+
+    def test_free_unicode_filename_and_uppercase_extension_upload_to_shared(self):
+        self.model=self.model.rename(self.root/'인코더 모델.ONNX')
+        self.run=self.make_run('shared_run')
+        receipt=uploader.upload_run(self.model,self.run,'owner/repo')
+        self.assertEqual(receipt['branch'],'shared')
+        pointer=git(['show','shared:models/인코더 모델.ONNX'],self.remote)
+        self.assertIn('version https://git-lfs.github.com/spec/v1',pointer)
+        self.assertIn('oid sha256:'+hashlib.sha256(self.model.read_bytes()).hexdigest(),pointer)
 
     def test_concurrent_fast_forward_is_rebased_without_force(self):
         uploader.upload_run(self.model, self.run, "owner/repo")

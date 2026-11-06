@@ -4,16 +4,81 @@ from __future__ import annotations
 from contextlib import contextmanager
 import csv
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import signal
+import sys
 import threading
 import time
+import traceback
 import uuid
 
 from github_upload import infer_user, _is_link, _sha256
+
+
+class ResilientConsole:
+    """Tee parent console output to disk; a disconnected terminal is optional.
+
+    Only errors from the console are suppressed. Log/data filesystem errors
+    still propagate, rather than disguising a failing SD card as a disconnect.
+    """
+    def __init__(self, console, logfile):
+        self.console, self.logfile = console, logfile
+        self.lock = threading.RLock()
+        self.detached = False
+
+    def write(self, text):
+        with self.lock:
+            self.logfile.write(text)
+            self.logfile.flush()
+            if not self.detached:
+                try: self.console.write(text); self.console.flush()
+                except OSError as error:
+                    if error.errno not in (errno.EIO, errno.EPIPE, errno.EBADF, errno.ENXIO): raise
+                    self.detached = True
+                    self.logfile.write(f"\n[console disconnected: errno={error.errno}; evaluation continues]\n")
+                    self.logfile.flush()
+        return len(text)
+
+    def flush(self):
+        with self.lock:
+            self.logfile.flush()
+            if not self.detached:
+                try: self.console.flush()
+                except OSError as error:
+                    if error.errno not in (errno.EIO, errno.EPIPE, errno.EBADF, errno.ENXIO): raise
+                    self.detached = True
+
+    @property
+    def encoding(self): return "utf-8"
+
+    def isatty(self): return False
+
+
+@contextmanager
+def console_logging(root):
+    directory = Path(root) / "queue"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "service.log"
+    if _is_link(directory) or _is_link(path): raise RuntimeError("Service log cannot be a symlink")
+    old_out, old_err = sys.stdout, sys.stderr
+    with path.open("a", encoding="utf-8", buffering=1) as log:
+        try:
+            sys.stdout, sys.stderr = ResilientConsole(old_out, log), ResilientConsole(old_err, log)
+            print("\nService started:", now(), "PID:", os.getpid(), flush=True)
+            yield
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+
+
+class QueueInterrupted(KeyboardInterrupt):
+    def __init__(self, number):
+        self.signal_number = number
+        self.signal_name = signal.Signals(number).name
+        super().__init__("Received " + self.signal_name)
 
 
 def now():
@@ -73,14 +138,15 @@ def evaluation_lock(root):
 
 
 @contextmanager
-def interrupt_signals():
+def interrupt_signals(keep_running_on_hangup=False):
     """Let ordinary service/SSH shutdown use the same cleanup as Ctrl+C."""
     previous = {}
-    def stop(signum, frame): raise KeyboardInterrupt
+    def stop(signum, frame): raise QueueInterrupted(signum)
     for name in ("SIGTERM", "SIGHUP"):
         if hasattr(signal, name):
             number = getattr(signal, name)
-            previous[number] = signal.signal(number, stop)
+            handler = signal.SIG_IGN if name == "SIGHUP" and keep_running_on_hangup else stop
+            previous[number] = signal.signal(number, handler)
     try: yield
     finally:
         for number, handler in previous.items(): signal.signal(number, handler)
@@ -347,13 +413,21 @@ def run_queue(root, settings, prepare, evaluate, *, names=None, retry_failed=Fal
             if not watch: break
             print(f"Queue waiting: {inbox} (poll {poll_seconds}s; Ctrl+C to stop)", flush=True)
             time.sleep(poll_seconds)
-    except KeyboardInterrupt:
-        final_reason = "사용자가 중단했습니다. 다음 실행에서 중단된 작업을 다시 시도합니다."
+    except KeyboardInterrupt as error:
+        final_reason = "중단 신호를 받았습니다: " + (str(error) or "KeyboardInterrupt / Ctrl+C")
+        state["service"]["interruption"] = final_reason
         save_state(directory, state)
         print("Queue stopped; saved state:", directory / "state.json", flush=True)
         return 130
     except Exception as error:
         final_phase, final_reason = "error", str(error)
+        failure = {"time_utc": now(), "type": type(error).__name__, "errno": getattr(error,"errno",None),
+                   "error": str(error), "traceback": traceback.format_exc()}
+        state["service"]["failure"] = failure
+        path = directory / "service_failure.log"
+        if _is_link(path): raise RuntimeError("Service failure log cannot be a symlink") from error
+        with path.open("a", encoding="utf-8") as log:
+            log.write(json.dumps(failure,ensure_ascii=False,indent=2)+"\n")
         save_state(directory, state)
         raise
     finally:

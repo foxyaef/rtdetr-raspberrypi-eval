@@ -396,7 +396,7 @@ def main(argv=None):
         elif args.worker=="infer":infer_worker(config)
         else:score_worker(config)
         return 0
-    from model_queue import evaluation_lock, interrupt_signals, run_queue
+    from model_queue import evaluation_lock, interrupt_signals, run_queue, console_logging
     if args.queue_status:
         state=ROOT/"queue/status.txt"
         print(state.read_text(encoding="utf-8") if state.exists() else "Queue has not been started.")
@@ -425,7 +425,7 @@ def main(argv=None):
                   "runtime_bundle_sha256":os.environ.get("RTDETR_BUNDLE_SHA256",sha256(__file__))}
         def evaluate(name,digest,prepared,progress):
             return evaluate_model(args,name=name,model_directory=inbox,expected_sha=digest,prepared=prepared,progress=progress)
-        with evaluation_lock(ROOT), interrupt_signals():
+        with evaluation_lock(ROOT), console_logging(ROOT), interrupt_signals(keep_running_on_hangup=not args.once):
             return run_queue(ROOT,settings,
                 lambda:prepare_data(args.data_dir.resolve(),download=not args.no_download),evaluate,
                 names=args.models,retry_failed=args.retry_failed,watch=not args.once,poll_seconds=args.poll_seconds)
@@ -464,7 +464,8 @@ def evaluate_model(args,*,name,model_directory=None,expected_sha=None,prepared=N
         raise ValueError("Queued model changed after registration; submit it under a new version name")
     if args.limit!=1000:print(f"SMOKE/PARTIAL: {args.limit} images. Accuracy is not the final 1000-image result.",flush=True)
     stamp=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-    output=args.results_dir.resolve()/(model.stem+"_"+stamp+"_"+uuid.uuid4().hex[:8]); output.mkdir(parents=True)
+    run_label=re.sub(r"[^A-Za-z0-9_.-]+","_",model.stem).strip("._-")[:120] or "model"
+    output=args.results_dir.resolve()/(run_label+"_"+stamp+"_"+uuid.uuid4().hex[:8]); output.mkdir(parents=True)
     config={"model_path":str(model),"result_dir":str(output),"data_dir":str(args.data_dir.resolve()),
             "limit":args.limit,"repeats":args.repeats,"threads":args.threads}
     config_path=output/"run_config.json"; write_json(config_path,config)

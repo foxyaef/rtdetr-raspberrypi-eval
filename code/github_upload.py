@@ -19,7 +19,7 @@ import zipfile
 from urllib.parse import quote
 
 DEFAULT_REPOSITORY = "foxyaef/rtdetr-raspberrypi-eval"
-MODEL_PATTERN = re.compile(r"^(user[1-4])_([A-Za-z0-9][A-Za-z0-9_.-]{0,119})\.(onnx|onix)$")
+USER_PREFIX = re.compile(r"^(user[0-9]+)_")
 SLUG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$")
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RESULT_EXTENSIONS = {".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".txt", ".log", ".md", ".jpg", ".jpeg", ".png", ".webp", ".zip"}
@@ -44,11 +44,14 @@ def _sanitize(value: str) -> str:
 
 
 def infer_user(model_path: Path | str) -> str:
-    """Return user1..user4; `.onix` is accepted as a legacy filename typo."""
-    match = MODEL_PATTERN.fullmatch(Path(model_path).name)
-    if not match or ".." in match.group(2):
-        raise UploadError("Model name must be user1_v1.onnx through user4_<version>.onnx (.onix also accepted).")
-    return match.group(1)
+    """Route optional userN_ prefix; unrestricted model names use shared."""
+    name = Path(model_path).name
+    if (name.startswith('.') or Path(name).suffix.lower() not in ('.onnx','.onix')
+            or len(name.encode('utf-8')) > 200
+            or any(ord(char)<32 or ord(char)==127 or char in '\\/:*?"<>|' for char in name)):
+        raise UploadError("Use a regular ONNX filename (no hidden name, control/path characters; max 200 UTF-8 bytes). A user prefix is optional.")
+    match = USER_PREFIX.match(name)
+    return match.group(1) if match else 'shared'
 
 
 def _is_link(path: Path) -> bool:
@@ -95,7 +98,7 @@ def _validate_inputs(model_path: Path | str, result_dir: Path | str, repo: str, 
     results = Path(result_dir).expanduser().absolute()
     user = infer_user(model)
     if branch is not None and branch != user:
-        raise UploadError("Branch must match the model filename's user1..user4 prefix.")
+        raise UploadError("Branch must match the inferred userN prefix or shared for a model without that prefix.")
     if not REPO_PATTERN.fullmatch(repo) or ".." in repo:
         raise UploadError("Repository must be a GitHub owner/repository name, without credentials or a URL.")
     if _is_link(model) or not model.is_file():
@@ -156,12 +159,12 @@ def _remote_url(repo: str) -> str:
     return f"https://github.com/{repo}.git"
 
 
-def _add_lfs_attributes(checkout: Path) -> None:
+def _add_lfs_attributes(checkout: Path, model_extension: str = "onnx") -> None:
     attributes = checkout / ".gitattributes"
     if _is_link(attributes):
         raise UploadError("Remote .gitattributes must not be a symlink.")
     content = attributes.read_text(encoding="utf-8") if attributes.exists() else ""
-    for extension in ("onnx", "onix"):
+    for extension in dict.fromkeys(("onnx", "onix", model_extension)):
         rule = f"models/*.{extension} filter=lfs diff=lfs merge=lfs -text"
         if rule not in content.splitlines():
             content = content.rstrip("\n") + ("\n" if content else "") + rule + "\n"
@@ -286,7 +289,7 @@ def upload_run(model_path: Path | str, result_dir: Path | str,
                 endpoint = remote + "/info/lfs"
                 _run(["config", "--local", "lfs.url", endpoint], checkout)
                 _run(["config", "--local", "lfs.pushurl", endpoint], checkout)
-            _add_lfs_attributes(checkout)
+            _add_lfs_attributes(checkout, model.suffix[1:])
             destination_model = checkout / "models" / model.name
             destination_run = checkout / "results" / user / results.name
             model_relative = f"models/{model.name}"
