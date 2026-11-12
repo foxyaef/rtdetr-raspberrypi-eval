@@ -160,12 +160,14 @@ def _remote_url(repo: str) -> str:
 
 
 def _add_lfs_attributes(checkout: Path, model_extension: str = "onnx") -> None:
-    attributes = checkout / ".gitattributes"
+    attributes = checkout / "models" / ".gitattributes"
+    _assert_safe_destination(attributes, checkout)
     if _is_link(attributes):
-        raise UploadError("Remote .gitattributes must not be a symlink.")
+        raise UploadError("Remote model attributes must not be a symlink.")
+    attributes.parent.mkdir(parents=True, exist_ok=True)
     content = attributes.read_text(encoding="utf-8") if attributes.exists() else ""
     for extension in dict.fromkeys(("onnx", "onix", model_extension)):
-        rule = f"models/*.{extension} filter=lfs diff=lfs merge=lfs -text"
+        rule = f"*.{extension} filter=lfs diff=lfs merge=lfs -text"
         if rule not in content.splitlines():
             content = content.rstrip("\n") + ("\n" if content else "") + rule + "\n"
     attributes.write_text(content, encoding="utf-8", newline="\n")
@@ -281,6 +283,8 @@ def upload_run(model_path: Path | str, result_dir: Path | str,
             elif exists.returncode == 1:
                 default = _run(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], checkout).stdout.strip()
                 _run(["checkout", "-b", user, default], checkout)
+                # Keep ancestry, but start the result branch with an empty tree.
+                _run(["rm", "-r", "--ignore-unmatch", "--", "."], checkout)
             else:
                 raise UploadError("Could not inspect the remote user branch.")
             _run(["lfs", "install", "--local"], checkout)
@@ -315,7 +319,7 @@ def upload_run(model_path: Path | str, result_dir: Path | str,
                 shutil.copyfile(source, target)
                 if _sha256(target) != result_hashes[relative]:
                     raise UploadError("Results changed during upload preparation; upload refused.")
-            _run(["add", "--", ".gitattributes"], checkout)
+            _run(["add", "--force", "--", "models/.gitattributes"], checkout)
             # Main ignores local weights/results. Only these explicit paths are
             # deliberately included on the selected user branch.
             _run(["add", "--force", "--", model_relative, run_relative], checkout)

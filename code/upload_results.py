@@ -183,10 +183,11 @@ def upload_archive(path, repo=GITHUB_REPOSITORY, *, check_only=False, temp_dir=N
         if blob_sha is None:
             print('3/4 Uploading ZIP only; no clone, extraction or model upload.',flush=True)
             blob_sha=upload_blob(api,repo,path,info,temp_dir)
-        base=api.request('GET',f'repos/{repo}/git/commits/{head}')
-        tree=api.request('POST',f'repos/{repo}/git/trees',{
-            'base_tree':base['tree']['sha'],
-            'tree':[{'path':info['remote_path'],'mode':'100644','type':'blob','sha':blob_sha}]})
+        tree_payload={'tree':[{'path':info['remote_path'],'mode':'100644','type':'blob','sha':blob_sha}]}
+        if not new_branch:
+            base=api.request('GET',f'repos/{repo}/git/commits/{head}')
+            tree_payload['base_tree']=base['tree']['sha']
+        tree=api.request('POST',f'repos/{repo}/git/trees',tree_payload)
         commit=api.request('POST',f'repos/{repo}/git/commits',{
             'message':f'Upload result ZIP {info["run_id"]} ({info["evaluation_status"]})',
             'tree':tree['sha'],'parents':[head]})['sha']

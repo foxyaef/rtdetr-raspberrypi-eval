@@ -42,7 +42,7 @@ class MemoryAPI:
             self.blobs[sha]=data;return {'sha':sha}
         if method=='GET' and path.startswith('git/commits/'):return self.commits[path.rsplit('/',1)[1]]
         if method=='POST' and path=='git/trees':
-            tree=self.trees[payload['base_tree']].copy()
+            tree=self.trees[payload['base_tree']].copy() if 'base_tree' in payload else {}
             for entry in payload['tree']:tree[entry['path']]=entry['sha']
             name='tree'+str(len(self.trees));self.trees[name]=tree;return {'sha':name}
         if method=='POST' and path=='git/commits':
@@ -93,7 +93,8 @@ class ZipUploadTests(unittest.TestCase):
         self.assertEqual(self.api.blobs[receipt['git_blob_sha']],before)
         self.assertEqual(self.api.refs['main'],'initial')
         tree=self.api.trees[self.api.commits[receipt['commit_sha']]['tree']['sha']]
-        self.assertEqual(tree['README.md'],'source')
+        self.assertNotIn('README.md',tree)
+        self.assertEqual(self.api.trees['base']['README.md'],'source')
         self.assertEqual(tree[receipt['remote_path']],receipt['git_blob_sha'])
         self.assertEqual(list(self.requests.iterdir()),[])
         self.assertEqual(self.path.read_bytes(),before)

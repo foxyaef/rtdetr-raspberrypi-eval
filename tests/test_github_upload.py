@@ -176,6 +176,8 @@ class LocalGitLFSIntegration(unittest.TestCase):
         first = uploader.upload_run(self.model, self.run, "owner/repo")
         self.assertEqual(Path.cwd(), cwd)
         self.assertEqual(first["branch"], "user1")
+        self.assertEqual(set(git(["ls-tree", "--name-only", "user1"], self.remote).splitlines()), {"models", "results"})
+        self.assertIn("*.onnx filter=lfs", git(["show", "user1:models/.gitattributes"], self.remote))
         self.assertEqual(git(["rev-parse", "main"], self.remote), self.main_sha)
         pointer = git(["show", "user1:models/user1_v1.onnx"], self.remote)
         digest = hashlib.sha256(self.model.read_bytes()).hexdigest()
