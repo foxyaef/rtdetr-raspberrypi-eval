@@ -1,0 +1,29 @@
+{
+  "python": "3.13.5",
+  "platform": "Linux-6.12.62+rpt-rpi-v8-aarch64-with-glibc2.41",
+  "machine": "aarch64",
+  "pointer_bits": 64,
+  "raspberry_pi_model": "Raspberry Pi 4 Model B Rev 1.5",
+  "cpu_logical_count": 4,
+  "RAM_total_bytes": 1935228928,
+  "RAM_available_bytes": 1220599808,
+  "swap_total_bytes": 1934618624,
+  "versions": {
+    "numpy": "2.2.6",
+    "Pillow": "11.2.1",
+    "onnx": "1.18.0",
+    "onnxruntime": "1.22.1",
+    "pycocotools": "2.0.10",
+    "psutil": "7.0.0"
+  },
+  "temperature_celsius": 32.615,
+  "throttled": "throttled=0x50005",
+  "provider": "CPUExecutionProvider",
+  "power": {
+    "status": "not_measured",
+    "power_mean_watts": null,
+    "power_peak_watts": null,
+    "energy_joules": null,
+    "reason": "No external electrical power meter configured; software estimates are not substituted."
+  }
+}
