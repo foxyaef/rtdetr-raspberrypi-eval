@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/backbone_w8a8_v1.onnx",
+  "result_dir": "/home/user1/results/backbone_w8a8_v1_20261112T103621_981459Z_48afe603",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
