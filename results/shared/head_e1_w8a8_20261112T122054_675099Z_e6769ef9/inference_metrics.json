@@ -1,0 +1,67 @@
+{
+  "sample_interval_seconds": 0.02,
+  "CSV_log_interval_seconds": 1,
+  "measurement_seconds": 7119.536384489969,
+  "sampler_error": null,
+  "cpu_logical_count": 4,
+  "cpu_process_peak_percent_one_core_100": 577.8,
+  "cpu_process_peak_percent_machine_normalized": 100.0,
+  "cpu_process_mean_percent_one_core_100": 394.67878921462926,
+  "cpu_system_peak_percent": 100.0,
+  "rss_baseline_bytes": 72306688,
+  "rss_sampled_peak_bytes": 559775744,
+  "rss_os_high_watermark_bytes": 559316992,
+  "rss_peak_bytes": 559775744,
+  "system_memory_used_peak_bytes": 1003237376,
+  "temperature_peak_celsius": 40.894,
+  "phases": {
+    "session_creation": {
+      "rss_peak_bytes": 72306688,
+      "cpu_peak_percent_one_core_100": 0.0
+    },
+    "warmup": {
+      "rss_peak_bytes": 559063040,
+      "cpu_peak_percent_one_core_100": 487.7
+    },
+    "inference": {
+      "rss_peak_bytes": 559775744,
+      "cpu_peak_percent_one_core_100": 577.8
+    }
+  },
+  "scope": "Inference child: session creation, warmup, measured inference, prediction streaming and local artifact writes. Data preparation, raw ONNX audit, COCO scoring and Git upload excluded. OS RSS high-watermark includes child imports.",
+  "CPU_note": "Process CPU uses 100% per logical CPU, so 4 fully used CPUs may report 400%; machine-normalized field divides by logical CPU count. Peaks are sampled observations.",
+  "model_load_seconds": 2.8807568529155105,
+  "latency": {
+    "preprocess_ms": {
+      "mean": 66.59546003560536,
+      "p50": 67.75963999098167,
+      "p95": 79.73120044916867
+    },
+    "inference_ms": {
+      "mean": 13862.669680631487,
+      "p50": 13847.385243978351,
+      "p95": 14168.37691978435
+    },
+    "output_conversion_ms": {
+      "mean": 7.326416931813583,
+      "p50": 7.42298795375973,
+      "p95": 8.423011418199156
+    },
+    "end_to_end_ms": {
+      "mean": 13936.613594297552,
+      "p50": 13920.336804527324,
+      "p95": 14243.727719318122
+    }
+  },
+  "inference_runs_timed": 500,
+  "inference_images_timed": 500,
+  "warmup_images": 10,
+  "latency_repeats": 1,
+  "power": {
+    "status": "not_measured",
+    "power_mean_watts": null,
+    "power_peak_watts": null,
+    "energy_joules": null,
+    "reason": "No external electrical power meter configured; software estimates are not substituted."
+  }
+}
