@@ -1,8 +1,0 @@
-{
-  "model_path": "/home/user1/queue/inbox/hanhyeong_qdrop_v1.onnx",
-  "result_dir": "/home/user1/results/hanhyeong_qdrop_v1_20261106T052134_467707Z_da3ef2da",
-  "data_dir": "/home/user1/data/coco",
-  "limit": 500,
-  "repeats": 1,
-  "threads": 4
-}
