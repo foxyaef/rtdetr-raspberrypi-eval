@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/fp32.onnx",
+  "result_dir": "/home/user1/results/fp32_20261114T063741_972928Z_cb2ffa11",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
