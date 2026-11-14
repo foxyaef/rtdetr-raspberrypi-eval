@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/head_e3_w8a8.onnx",
+  "result_dir": "/home/user1/results/head_e3_w8a8_20261114T201616_914849Z_d6d8924b",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
