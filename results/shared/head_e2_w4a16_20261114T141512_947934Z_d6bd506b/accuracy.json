@@ -1,0 +1,21 @@
+{
+  "mAP50_95": 0.575483849357885,
+  "mAP50": 0.7582210206276654,
+  "mAP75": 0.6176227783394462,
+  "AR100": 0.7548628199869539,
+  "precision": 0.827613104524181,
+  "recall": 0.6625039025913206,
+  "protocol": {
+    "evaluator": "pycocotools bbox",
+    "IoU": "0.50:0.05:0.95",
+    "maxDets": [
+      1,
+      10,
+      100
+    ],
+    "score_threshold": 0.5,
+    "precision_recall_IoU": 0.5,
+    "class_absent_policy": "AP/Recall null; COCO mean excludes categories with no eligible GT",
+    "aggregation": "Precision/Recall micro; AP macro; AP uses all scores, not thresholded"
+  }
+}
