@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/user3_decoder_v4_keep2.onnx",
+  "result_dir": "/home/user1/results/user3_decoder_v4_keep2_20261116T034538_435471Z_3a9525b6",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
