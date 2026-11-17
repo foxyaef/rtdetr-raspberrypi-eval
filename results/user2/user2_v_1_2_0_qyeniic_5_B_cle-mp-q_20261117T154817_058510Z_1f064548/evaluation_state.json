@@ -1,0 +1,10 @@
+{
+  "status": "complete",
+  "stage": "complete",
+  "image_count": 500,
+  "protocol_image_count": 500,
+  "source_pool_image_count": 1000,
+  "evaluation_selection": "first_n_by_filename_from_pinned_evaluation_pool",
+  "evaluation_scope": "protocol_default",
+  "full_evaluation": true
+}
