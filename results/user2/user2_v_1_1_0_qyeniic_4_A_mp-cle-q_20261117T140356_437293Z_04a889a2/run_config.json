@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/user2_v_1_1_0_qyeniic_4_A_mp-cle-q.onnx",
+  "result_dir": "/home/user1/results/user2_v_1_1_0_qyeniic_4_A_mp-cle-q_20261117T140356_437293Z_04a889a2",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
