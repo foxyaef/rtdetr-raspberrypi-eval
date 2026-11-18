@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/user1_cnn_brecq_v2.onnx",
+  "result_dir": "/home/user1/results/user1_cnn_brecq_v2_20261118T093023_894941Z_f1193016",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}

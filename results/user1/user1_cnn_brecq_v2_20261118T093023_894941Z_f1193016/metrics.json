@@ -1,0 +1,96 @@
+{
+  "mAP50_95": 0.5183564390725807,
+  "mAP50": 0.6972444784033967,
+  "mAP75": 0.5674136741633778,
+  "AR100": 0.7137706504404625,
+  "precision": 0.9240331491712708,
+  "recall": 0.41773337496097407,
+  "protocol": {
+    "evaluator": "pycocotools bbox",
+    "IoU": "0.50:0.05:0.95",
+    "maxDets": [
+      1,
+      10,
+      100
+    ],
+    "score_threshold": 0.5,
+    "precision_recall_IoU": 0.5,
+    "class_absent_policy": "AP/Recall null; COCO mean excludes categories with no eligible GT",
+    "aggregation": "Precision/Recall micro; AP macro; AP uses all scores, not thresholded"
+  },
+  "resource": {
+    "sample_interval_seconds": 0.02,
+    "CSV_log_interval_seconds": 1,
+    "measurement_seconds": 2561.3475387609997,
+    "sampler_error": null,
+    "cpu_logical_count": 4,
+    "cpu_process_peak_percent_one_core_100": 586.2,
+    "cpu_process_peak_percent_machine_normalized": 100.0,
+    "cpu_process_mean_percent_one_core_100": 395.826409597828,
+    "cpu_system_peak_percent": 100.0,
+    "rss_baseline_bytes": 72175616,
+    "rss_sampled_peak_bytes": 486473728,
+    "rss_os_high_watermark_bytes": 486170624,
+    "rss_peak_bytes": 486473728,
+    "system_memory_used_peak_bytes": 967016448,
+    "temperature_peak_celsius": 58.426,
+    "phases": {
+      "session_creation": {
+        "rss_peak_bytes": 72175616,
+        "cpu_peak_percent_one_core_100": 0.0
+      },
+      "warmup": {
+        "rss_peak_bytes": 485752832,
+        "cpu_peak_percent_one_core_100": 533.3
+      },
+      "inference": {
+        "rss_peak_bytes": 486473728,
+        "cpu_peak_percent_one_core_100": 586.2
+      }
+    },
+    "scope": "Inference child: session creation, warmup, measured inference, prediction streaming and local artifact writes. Data preparation, raw ONNX audit, COCO scoring and Git upload excluded. OS RSS high-watermark includes child imports.",
+    "CPU_note": "Process CPU uses 100% per logical CPU, so 4 fully used CPUs may report 400%; machine-normalized field divides by logical CPU count. Peaks are sampled observations.",
+    "model_load_seconds": 2.3046424130000105,
+    "latency": {
+      "preprocess_ms": {
+        "mean": 33.33772170800091,
+        "p50": 33.132520000151544,
+        "p95": 37.89345725019757
+      },
+      "inference_ms": {
+        "mean": 4973.313538576004,
+        "p50": 4968.566878999809,
+        "p95": 5035.736123700041
+      },
+      "output_conversion_ms": {
+        "mean": 2.8434912979982983,
+        "p50": 2.8459560001010686,
+        "p95": 2.92696474996319
+      },
+      "end_to_end_ms": {
+        "mean": 5009.508879149997,
+        "p50": 5004.506538500095,
+        "p95": 5071.989668499845
+      }
+    },
+    "inference_runs_timed": 500,
+    "inference_images_timed": 500,
+    "warmup_images": 10,
+    "latency_repeats": 1,
+    "power": {
+      "status": "not_measured",
+      "power_mean_watts": null,
+      "power_peak_watts": null,
+      "energy_joules": null,
+      "reason": "No external electrical power meter configured; software estimates are not substituted."
+    }
+  },
+  "model_file_bytes": 138375449,
+  "model_file_MiB": 131.9651117324829,
+  "image_count": 500,
+  "protocol_image_count": 500,
+  "source_pool_image_count": 1000,
+  "evaluation_selection": "first_n_by_filename_from_pinned_evaluation_pool",
+  "evaluation_scope": "protocol_default",
+  "full_evaluation": true
+}
