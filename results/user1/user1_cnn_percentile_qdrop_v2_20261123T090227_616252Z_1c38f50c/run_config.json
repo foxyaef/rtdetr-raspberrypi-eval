@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/user1_cnn_percentile_qdrop_v2.onnx",
+  "result_dir": "/home/user1/results/user1_cnn_percentile_qdrop_v2_20261123T090227_616252Z_1c38f50c",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
