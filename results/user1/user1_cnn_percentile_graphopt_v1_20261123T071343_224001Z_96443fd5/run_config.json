@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/user1_cnn_percentile_graphopt_v1.onnx",
+  "result_dir": "/home/user1/results/user1_cnn_percentile_graphopt_v1_20261123T071343_224001Z_96443fd5",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
