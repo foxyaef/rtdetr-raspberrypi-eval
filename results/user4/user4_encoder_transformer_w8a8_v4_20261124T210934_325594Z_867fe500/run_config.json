@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/user4_encoder_transformer_w8a8_v4.onnx",
+  "result_dir": "/home/user1/results/user4_encoder_transformer_w8a8_v4_20261124T210934_325594Z_867fe500",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
