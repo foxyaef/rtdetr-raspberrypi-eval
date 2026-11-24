@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/user3_decoder_v6a_nomatmulout.onnx",
+  "result_dir": "/home/user1/results/user3_decoder_v6a_nomatmulout_20261124T190139_664979Z_188b8c46",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
