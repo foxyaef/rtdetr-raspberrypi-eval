@@ -1,0 +1,8 @@
+{
+  "model_path": "/home/user1/queue/inbox/user1_merge_v2.onnx",
+  "result_dir": "/home/user1/results/user1_merge_v2_20261125T023200_913171Z_ccb2b13b",
+  "data_dir": "/home/user1/data/coco",
+  "limit": 500,
+  "repeats": 1,
+  "threads": 4
+}
